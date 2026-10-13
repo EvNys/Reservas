@@ -121,6 +121,19 @@ function timeBlocks(room: Room) {
   return blocks
 }
 
+function timeMinutes(time: string) {
+  const [hour, minute] = time.split(':').map(Number)
+  return hour * 60 + minute
+}
+
+function rangeBlocks(start: string, end: string) {
+  const blocks: string[] = []
+  for (let cursor = timeMinutes(start); cursor < timeMinutes(end); cursor += 30) {
+    blocks.push(`${String(Math.floor(cursor / 60)).padStart(2, '0')}:${String(cursor % 60).padStart(2, '0')}`)
+  }
+  return blocks
+}
+
 function formatRanges(blocks: string[]) {
   const sorted = [...blocks].sort()
   const ranges: { start: string; end: string }[] = []
@@ -323,6 +336,37 @@ function App() {
     } finally {
       setBusy(false)
     }
+  }
+
+  function handleAddTimeRange(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!room) return
+    const form = new FormData(event.currentTarget)
+    const start = String(form.get('rangeStart'))
+    const end = String(form.get('rangeEnd'))
+    const availableBlocks = timeBlocks(room)
+    const requestedBlocks = rangeBlocks(start, end)
+    if (!requestedBlocks.length
+      || (timeMinutes(end) - timeMinutes(start)) % 30 !== 0
+      || requestedBlocks.some((block) => !availableBlocks.includes(block))
+      || timeMinutes(end) > timeMinutes(room.closeTime)) {
+      setToast('Escolha um intervalo válido dentro do horário de funcionamento da sala.')
+      return
+    }
+    if (requestedBlocks.some((block) => occupiedBlocks.has(block))) {
+      setToast('O intervalo inclui um horário já reservado. Escolha outro período.')
+      return
+    }
+    if (requestedBlocks.some((block) => date < today || (date === today && block <= currentTime))) {
+      setToast('O intervalo inclui horários que já passaram.')
+      return
+    }
+    const combinedBlocks = [...new Set([...selectedBlocks, ...requestedBlocks])].sort()
+    if (combinedBlocks.length > 20) {
+      setToast('Selecione no máximo 20 blocos de 30 minutos por reserva.')
+      return
+    }
+    setSelectedBlocks(combinedBlocks)
   }
 
   async function handleCancel(reservation: Reservation) {
@@ -586,6 +630,20 @@ function App() {
                     <div className="flex items-center gap-3 text-[10px] text-slate-500"><span className="flex items-center gap-1.5"><i className="h-2.5 w-2.5 rounded border border-slate-200 bg-white" /> Livre</span><span className="flex items-center gap-1.5"><i className="h-2.5 w-2.5 rounded bg-slate-200" /> Reservado</span><span className="flex items-center gap-1.5"><i className="h-2.5 w-2.5 rounded bg-blue-600" /> Selecionado</span></div>
                   </div>
                   <div className="mb-3 flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2 text-[10px] text-slate-500"><span className="flex items-center gap-1.5"><Clock3 size={13} /> Intervalos de 30 minutos</span><span>{room.openTime} – {room.closeTime}</span></div>
+                  <form onSubmit={handleAddTimeRange} className="mb-4 flex flex-wrap items-end gap-2 rounded-xl border border-blue-100 bg-blue-50/50 p-3">
+                    <div className="mr-auto"><div className="text-[11px] font-semibold text-slate-700">Adicionar intervalo contínuo</div><div className="mt-0.5 text-[10px] text-slate-500">O horário final não é incluído.</div></div>
+                    <label className="form-label">De
+                      <select name="rangeStart" defaultValue={room.openTime} className="form-input mt-1 py-2">
+                        {timeBlocks(room).map((block) => <option key={block} value={block}>{block}</option>)}
+                      </select>
+                    </label>
+                    <label className="form-label">Até
+                      <select name="rangeEnd" defaultValue={timeBlocks(room)[2] || room.closeTime} className="form-input mt-1 py-2">
+                        {[...new Set([...timeBlocks(room).slice(1), room.closeTime])].map((block) => <option key={block} value={block}>{block}</option>)}
+                      </select>
+                    </label>
+                    <button className="rounded-lg bg-blue-600 px-3 py-2 text-[11px] font-semibold text-white hover:bg-blue-700">Adicionar</button>
+                  </form>
                   <div className="grid grid-cols-3 gap-2 sm:grid-cols-4 md:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-7">
                     {timeBlocks(room).map((block) => {
                       const reserved = occupiedBlocks.has(block)
@@ -771,7 +829,11 @@ function AuthScreen({ error, onError }: { error: string; onError: (error: string
       else await firebase.signIn(String(form.get('email')), String(form.get('password')))
     } catch (cause) {
       const code = cause && typeof cause === 'object' && 'code' in cause ? String(cause.code) : ''
-      onError(code === 'auth/invalid-credential' ? 'E-mail ou senha incorretos.' : errorMessage(cause))
+      onError(code === 'auth/invalid-credential'
+        ? 'E-mail ou senha incorretos.'
+        : code === 'permission-denied' || code === 'firestore/permission-denied'
+          ? 'O Firebase recusou a gravação do pedido. Publique as regras atualizadas do Firestore e entre novamente para concluir o cadastro.'
+          : errorMessage(cause))
     } finally {
       setBusy(false)
     }

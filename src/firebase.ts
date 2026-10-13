@@ -105,7 +105,17 @@ export async function loadProfile(user: User): Promise<Profile | null> {
   const profileRef = doc(db, 'users', user.uid)
   const profileSnapshot = await getDoc(profileRef)
   if (profileSnapshot.exists()) return profileSnapshot.data() as Profile
-  return null
+
+  const profile: Profile = {
+    uid: user.uid,
+    name: user.displayName || user.email?.split('@')[0] || 'Usuário',
+    email: user.email || '',
+    role: 'user',
+    companyId,
+    status: 'pending',
+  }
+  await setDoc(profileRef, profile)
+  return profile
 }
 
 export function subscribeToProfile(

@@ -34,7 +34,7 @@ As variáveis `VITE_*` são incluídas no bundle do navegador. As credenciais do
 
 ## Como funciona
 
-- A disponibilidade é organizada em blocos de 30 minutos. Uma reserva pode conter blocos contínuos ou separados da mesma sala e data.
+- A disponibilidade é organizada em blocos de 30 minutos. Use **Adicionar intervalo contínuo** para reservar entre um horário inicial e final (o final não é incluído, então 14:00–15:00 bloqueia 14:00 e 14:30), ou selecione blocos individuais para combinar períodos separados da mesma sala e data.
 - O cliente confirma a reserva em uma transação Firestore: cria a reserva, bloqueia os documentos determinísticos em `roomSlots` e atualiza o consumo mensal compartilhado.
 - Reservas concorrentes para o mesmo horário são recusadas pela transação se o bloco já tiver sido ocupado.
 - O limite inicial, quando o documento do pacote ainda não existe, é 50 horas. Cadastre o pacote na área administrativa antes do uso real para definir o limite oficial.
