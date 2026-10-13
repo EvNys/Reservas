@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { FormEvent, ReactNode } from 'react'
 import {
   AlarmClock,
@@ -16,6 +16,7 @@ import {
   MapPin,
   Menu,
   Plus,
+  Search,
   Settings2,
   ShieldCheck,
   Sparkles,
@@ -23,7 +24,7 @@ import {
   X,
 } from 'lucide-react'
 import { companyId, firebaseEnabled, whatsappNumber } from './firebase-config'
-import type { AccessRequest, Profile, Reservation, Room, WorkspaceData } from './firebase'
+import type { AccessRequest, PackageInfo, Profile, Reservation, Room, WorkspaceData } from './firebase'
 
 type View = 'reserve' | 'mine' | 'manage'
 
@@ -40,6 +41,10 @@ const demoProfile: Profile = {
 }
 const demoAccessRequests: AccessRequest[] = [
   { uid: 'demo-pending-1', name: 'Pedro Martins', email: 'pedro@acme.com', role: 'user', companyId, status: 'pending' },
+]
+const demoAccounts: Profile[] = [
+  { uid: 'demo-colleague', name: 'Rafael Costa', email: 'rafael@acme.com', role: 'user', companyId, status: 'approved', packageLabel: 'Plano essencial', monthlyHours: 20 },
+  { uid: 'demo-marina', name: 'Marina Alves', email: 'marina@acme.com', role: 'user', companyId, status: 'approved', packageLabel: 'Plano flexível', monthlyHours: 35 },
 ]
 const demoRooms: Room[] = [
   { id: 'sala-ipe', name: 'Sala Ipê', location: '2º andar · Ala norte', capacity: 8, openTime: '08:00', closeTime: '18:00', color: 'blue', companyId, active: true },
@@ -63,7 +68,7 @@ function seedWorkspace(): WorkspaceData {
   const seedReservations: Reservation[] = [
     { id: 'demo-booking-1', userId: 'demo-colleague', userName: 'Rafael Costa', companyId, roomId: 'sala-ipe', roomName: 'Sala Ipê', date: today, blocks: ['10:00', '10:30', '11:00', '11:30'], hours: 2, status: 'confirmed', createdAt: Date.now() },
     { id: 'demo-booking-2', userId: 'demo-user', userName: demoProfile.name, companyId, roomId: 'sala-aurora', roomName: 'Sala Aurora', date: today, blocks: ['14:00', '14:30'], hours: 1, status: 'confirmed', createdAt: Date.now() },
-    { id: 'demo-booking-3', userId: 'demo-colleague', userName: 'Marina Alves', companyId, roomId: 'sala-patio', roomName: 'Sala Pátio', date: today, blocks: ['13:00', '13:30', '14:00', '14:30', '15:00', '15:30'], hours: 3, status: 'confirmed', createdAt: Date.now() },
+    { id: 'demo-booking-3', userId: 'demo-marina', userName: 'Marina Alves', companyId, roomId: 'sala-patio', roomName: 'Sala Pátio', date: today, blocks: ['13:00', '13:30', '14:00', '14:30', '15:00', '15:30'], hours: 3, status: 'confirmed', createdAt: Date.now() },
   ]
   try {
     const saved = localStorage.getItem('reservas-demo')
@@ -84,17 +89,6 @@ function saveDemoWorkspace(data: WorkspaceData) {
     localStorage.setItem('reservas-demo', JSON.stringify(data))
   } catch (error) {
     console.error('Não foi possível salvar os dados locais da demonstração.', error)
-  }
-}
-
-function demoUsageForMonth(month: string) {
-  if (month === currentMonth) return null
-  try {
-    const usageByMonth = JSON.parse(localStorage.getItem('reservas-uso') || '{}') as Record<string, number>
-    return usageByMonth[month] || 0
-  } catch (error) {
-    console.error('Não foi possível carregar o consumo local da demonstração.', error)
-    return 0
   }
 }
 
@@ -153,11 +147,22 @@ function makeWhatsAppLink(message: string) {
   return `https://wa.me/${phone}?text=${encodeURIComponent(message)}`
 }
 
+function accountPackage(account: Profile, fallback: PackageInfo): PackageInfo {
+  return {
+    label: account.packageLabel || fallback.label,
+    monthlyHours: account.monthlyHours ?? fallback.monthlyHours,
+  }
+}
+
 function App() {
   const [workspace, setWorkspace] = useState<WorkspaceData>(seedWorkspace)
   const [profile, setProfile] = useState<Profile | null>(firebaseEnabled ? null : demoProfile)
   const [pendingAccounts, setPendingAccounts] = useState<AccessRequest[]>(firebaseEnabled ? [] : demoAccessRequests)
+  const [companyAccounts, setCompanyAccounts] = useState<Profile[]>(firebaseEnabled ? [] : [demoProfile, ...demoAccounts])
   const [accountRoles, setAccountRoles] = useState<Record<string, Profile['role']>>({})
+  const [accountPackageDrafts, setAccountPackageDrafts] = useState<Record<string, PackageInfo>>({})
+  const [accountSearch, setAccountSearch] = useState('')
+  const [companyAccountsSnapshot, setCompanyAccountsSnapshot] = useState<string | null>(firebaseEnabled ? null : companyId)
   const [view, setView] = useState<View>('reserve')
   const [date, setDate] = useState(today)
   const [selectedRoom, setSelectedRoom] = useState('')
@@ -167,6 +172,8 @@ function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [authError, setAuthError] = useState('')
   const [usageSnapshot, setUsageSnapshot] = useState<{ month: string; hoursUsed: number } | null>(null)
+  const [reservationsSnapshot, setReservationsSnapshot] = useState<string | null>(null)
+  const initializedUsage = useRef(new Set<string>())
   const selectedMonth = date.slice(0, 7)
 
   useEffect(() => {
@@ -231,6 +238,27 @@ function App() {
   }, [profile])
 
   useEffect(() => {
+    if (!firebaseEnabled || profile?.role !== 'admin' || profile.status === 'pending' || profile.status === 'rejected') return
+    let unsubscribe: () => void = () => {}
+    let cancelled = false
+    void import('./firebase').then(({ subscribeToCompanyAccounts }) => {
+      if (cancelled) return
+      unsubscribe = subscribeToCompanyAccounts(
+        profile.companyId,
+        (accounts) => {
+          setCompanyAccounts(accounts)
+          setCompanyAccountsSnapshot(profile.companyId)
+        },
+        (error) => setToast(`Erro ao carregar usuários: ${error.message}`),
+      )
+    }).catch((error: unknown) => setToast(`Erro ao carregar usuários: ${errorMessage(error)}`))
+    return () => {
+      cancelled = true
+      unsubscribe()
+    }
+  }, [profile])
+
+  useEffect(() => {
     if (!firebaseEnabled || !profile) return
     let unsubscribe: () => void = () => {}
     let cancelled = false
@@ -242,6 +270,7 @@ function App() {
         (error) => setToast(`Erro ao sincronizar: ${error.message}`),
         selectedMonth,
         (hoursUsed) => setUsageSnapshot({ month: selectedMonth, hoursUsed }),
+        () => setReservationsSnapshot(`${profile.companyId}_${selectedMonth}`),
       )
     }).catch((error: unknown) => setToast(`Erro ao conectar ao Firebase: ${errorMessage(error)}`))
     return () => {
@@ -250,13 +279,46 @@ function App() {
     }
   }, [profile, selectedMonth])
 
+  useEffect(() => {
+    if (!firebaseEnabled
+      || profile?.role !== 'admin'
+      || companyAccountsSnapshot !== profile.companyId
+      || reservationsSnapshot !== `${profile.companyId}_${selectedMonth}`) return
+    const monthReservations = workspace.reservations.filter(
+      (booking) => booking.date.slice(0, 7) === selectedMonth && booking.status === 'confirmed',
+    )
+    void import('./firebase').then(({ initializeUserMonthlyUsage }) => {
+      companyAccounts.forEach((account) => {
+        const key = `${profile.companyId}_${account.uid}_${selectedMonth}`
+        if (initializedUsage.current.has(key)) return
+        initializedUsage.current.add(key)
+        const hoursUsed = monthReservations
+          .filter((booking) => booking.userId === account.uid)
+          .reduce((total, booking) => total + booking.hours, 0)
+        void initializeUserMonthlyUsage(profile.companyId, account.uid, selectedMonth, hoursUsed)
+          .catch((error: unknown) => {
+            initializedUsage.current.delete(key)
+            setToast(`Erro ao sincronizar o saldo de ${account.name}: ${errorMessage(error)}`)
+          })
+      })
+    }).catch((error: unknown) => setToast(`Erro ao inicializar saldo dos usuários: ${errorMessage(error)}`))
+  }, [profile, companyAccounts, companyAccountsSnapshot, reservationsSnapshot, workspace.reservations, selectedMonth])
+
   const allRooms = workspace.rooms
   const rooms = allRooms.filter((room) => room.active)
   const room = rooms.find((item) => item.id === selectedRoom) || rooms[0]
-  const currentUsage = firebaseEnabled
-    ? usageSnapshot?.month === selectedMonth ? usageSnapshot.hoursUsed : 0
-    : demoUsageForMonth(selectedMonth) ?? workspace.hoursUsed
-  const remaining = Math.max(0, workspace.packageInfo.monthlyHours - currentUsage)
+  const userPackage: PackageInfo = {
+    ...(profile ? accountPackage(profile, workspace.packageInfo) : workspace.packageInfo),
+  }
+  const currentUsage = workspace.reservations
+    .filter((booking) => booking.userId === profile?.uid && booking.date.slice(0, 7) === selectedMonth && booking.status === 'confirmed')
+    .reduce((total, booking) => total + booking.hours, 0)
+  const companyCurrentUsage = usageSnapshot?.month === selectedMonth
+    ? usageSnapshot.hoursUsed
+    : workspace.reservations
+      .filter((booking) => booking.date.slice(0, 7) === selectedMonth && booking.status === 'confirmed')
+      .reduce((total, booking) => total + booking.hours, 0)
+  const remaining = Math.max(0, userPackage.monthlyHours - currentUsage)
   const bookingHours = selectedBlocks.length * 0.5
   const occupiedBlocks = new Set(
     workspace.reservations
@@ -266,6 +328,9 @@ function App() {
   const userReservations = workspace.reservations
     .filter((item) => item.userId === profile?.uid && item.status === 'confirmed')
     .sort((left, right) => left.date.localeCompare(right.date))
+  const filteredAccounts = companyAccounts
+    .filter((account) => `${account.name} ${account.email}`.toLocaleLowerCase('pt-BR').includes(accountSearch.trim().toLocaleLowerCase('pt-BR')))
+    .sort((left, right) => left.name.localeCompare(right.name, 'pt-BR'))
   const monthDate = new Date(`${date}T12:00:00`)
   const dayCount = new Date(monthDate.getFullYear(), monthDate.getMonth() + 1, 0).getDate()
   const firstWeekday = (new Date(monthDate.getFullYear(), monthDate.getMonth(), 1).getDay() + 6) % 7
@@ -320,11 +385,6 @@ function App() {
           ...workspace,
           reservations: [...workspace.reservations, reservation],
           hoursUsed: date.slice(0, 7) === currentMonth ? workspace.hoursUsed + bookingHours : workspace.hoursUsed,
-        }
-        if (date.slice(0, 7) !== currentMonth) {
-          const usage = JSON.parse(localStorage.getItem('reservas-uso') || '{}') as Record<string, number>
-          usage[selectedMonth] = currentUsage + bookingHours
-          localStorage.setItem('reservas-uso', JSON.stringify(usage))
         }
         setWorkspace(updated)
         saveDemoWorkspace(updated)
@@ -382,11 +442,6 @@ function App() {
           hoursUsed: reservation.date.slice(0, 7) === currentMonth
             ? Math.max(0, workspace.hoursUsed - reservation.hours)
             : workspace.hoursUsed,
-        }
-        if (reservation.date.slice(0, 7) !== currentMonth) {
-          const usage = JSON.parse(localStorage.getItem('reservas-uso') || '{}') as Record<string, number>
-          usage[reservation.date.slice(0, 7)] = Math.max(0, (usage[reservation.date.slice(0, 7)] ?? reservation.hours) - reservation.hours)
-          localStorage.setItem('reservas-uso', JSON.stringify(usage))
         }
         setWorkspace(updated)
         saveDemoWorkspace(updated)
@@ -478,16 +533,55 @@ function App() {
 
   async function handleAccountDecision(account: AccessRequest, approved: boolean) {
     const role = accountRoles[account.uid] || 'user'
+    const packageInfo = accountPackageDrafts[account.uid] || workspace.packageInfo
+    if (approved && (!packageInfo.label.trim() || !Number.isFinite(packageInfo.monthlyHours) || packageInfo.monthlyHours < 0)) {
+      setToast('Informe um nome de pacote e uma quantidade válida de horas mensais.')
+      return
+    }
     try {
       if (firebaseEnabled) {
         const { updateAccountAccess } = await import('./firebase')
-        await updateAccountAccess(account.uid, approved ? 'approved' : 'rejected', role)
+        await updateAccountAccess(account.uid, approved ? 'approved' : 'rejected', role, approved ? {
+          ...packageInfo,
+          label: packageInfo.label.trim(),
+        } : undefined)
       } else {
         setPendingAccounts((accounts) => accounts.filter((item) => item.uid !== account.uid))
+        if (approved) setCompanyAccounts((accounts) => [...accounts, {
+          ...account,
+          status: 'approved',
+          packageLabel: packageInfo.label.trim(),
+          monthlyHours: packageInfo.monthlyHours,
+        }])
       }
       setToast(approved ? `Acesso permitido para ${account.name} como ${role === 'admin' ? 'administrador' : 'usuário'}.` : `Solicitação de ${account.name} recusada.`)
     } catch (error) {
       setToast(`Não foi possível atualizar o acesso: ${errorMessage(error)}`)
+    }
+  }
+
+  async function handleSaveAccountPackage(account: Profile, packageInfo: PackageInfo) {
+    const nextPackage = { ...packageInfo, label: packageInfo.label.trim() }
+    if (!nextPackage.label || !Number.isFinite(nextPackage.monthlyHours) || nextPackage.monthlyHours < 0) {
+      setToast('Informe um nome de pacote e uma quantidade válida de horas mensais.')
+      return
+    }
+    try {
+      if (firebaseEnabled) {
+        const { updateAccountPackage } = await import('./firebase')
+        await updateAccountPackage(account.uid, nextPackage)
+      } else {
+        setCompanyAccounts((accounts) => accounts.map((item) => item.uid === account.uid
+          ? { ...item, packageLabel: nextPackage.label, monthlyHours: nextPackage.monthlyHours }
+          : item))
+        if (profile?.uid === account.uid) {
+          setProfile({ ...account, packageLabel: nextPackage.label, monthlyHours: nextPackage.monthlyHours })
+        }
+      }
+      setAccountPackageDrafts((drafts) => ({ ...drafts, [account.uid]: nextPackage }))
+      setToast(`Pacote de ${account.name} atualizado.`)
+    } catch (error) {
+      setToast(`Não foi possível atualizar o pacote de ${account.name}: ${errorMessage(error)}`)
     }
   }
 
@@ -537,9 +631,9 @@ function App() {
         <div className="mt-9 mb-3 px-3 text-[10px] font-bold uppercase tracking-[0.17em] text-slate-400">Sua empresa</div>
         <div className="rounded-xl border border-slate-100 bg-slate-50 p-3">
           <div className="flex items-center justify-between"><span className="text-xs font-semibold text-slate-700">Horas disponíveis</span><Sparkles size={14} className="text-blue-500" /></div>
-          <div className="mt-3 flex items-end gap-1.5"><span className="text-[26px] font-bold leading-none tracking-tight">{remaining.toLocaleString('pt-BR', { maximumFractionDigits: 1 })}</span><span className="pb-0.5 text-xs text-slate-500">/ {workspace.packageInfo.monthlyHours} h</span></div>
-          <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-slate-200"><div className="h-full rounded-full bg-blue-600 transition-all" style={{ width: `${Math.min(100, currentUsage / Math.max(1, workspace.packageInfo.monthlyHours) * 100)}%` }} /></div>
-          <p className="mt-2 text-[10px] leading-4 text-slate-500">{workspace.packageInfo.label} · {monthLabel(date)}</p>
+          <div className="mt-3 flex items-end gap-1.5"><span className="text-[26px] font-bold leading-none tracking-tight">{remaining.toLocaleString('pt-BR', { maximumFractionDigits: 1 })}</span><span className="pb-0.5 text-xs text-slate-500">/ {userPackage.monthlyHours} h</span></div>
+          <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-slate-200"><div className="h-full rounded-full bg-blue-600 transition-all" style={{ width: `${Math.min(100, currentUsage / Math.max(1, userPackage.monthlyHours) * 100)}%` }} /></div>
+          <p className="mt-2 text-[10px] leading-4 text-slate-500">{userPackage.label} · {monthLabel(date)}</p>
         </div>
 
         <a href={makeWhatsAppLink(whatsappMessage)} target="_blank" rel="noreferrer" className="mt-3 flex items-center justify-between rounded-xl bg-blue-50 px-3 py-3 text-xs font-semibold text-blue-700 transition hover:bg-blue-100">
@@ -687,7 +781,7 @@ function App() {
             <div className="mt-7 grid gap-4 md:grid-cols-3">
               <MetricCard label="Próximas reservas" value={String(userReservations.filter((item) => item.date >= today).length)} icon={<CalendarDays size={18} />} />
               <MetricCard label="Horas neste mês" value={`${workspace.reservations.filter((item) => item.userId === profile.uid && item.date.slice(0, 7) === currentMonth && item.status === 'confirmed').reduce((sum, item) => sum + item.hours, 0).toLocaleString('pt-BR')} h`} icon={<Clock3 size={18} />} />
-              <MetricCard label="Pacote da empresa" value={`${remaining.toLocaleString('pt-BR', { maximumFractionDigits: 1 })} h`} icon={<Sparkles size={18} />} />
+              <MetricCard label="Meu pacote" value={`${remaining.toLocaleString('pt-BR', { maximumFractionDigits: 1 })} h`} icon={<Sparkles size={18} />} />
             </div>
             <div className="mt-6 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
               <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4"><h2 className="text-sm font-bold">Sua agenda</h2><button onClick={() => setView('reserve')} className="flex items-center gap-1.5 text-xs font-semibold text-blue-700"><Plus size={15} /> Nova reserva</button></div>
@@ -702,11 +796,11 @@ function App() {
           </section>}
 
           {view === 'manage' && profile.role === 'admin' && <section>
-            <PageHeading eyebrow="ADMINISTRAÇÃO" title="Gestão dos espaços" description="Gerencie salas, horários e o pacote mensal da empresa." />
+            <PageHeading eyebrow="ADMINISTRAÇÃO" title="Gestão dos espaços" description="Gerencie usuários, seus pacotes individuais, reservas e salas." />
             <div className="mt-6 rounded-2xl border border-amber-200 bg-white p-5 shadow-sm md:p-6">
               <div className="mb-4 flex items-center gap-3">
                 <span className="rounded-lg bg-amber-50 p-2 text-amber-700"><Bell size={18} /></span>
-                <div><h2 className="text-sm font-bold">Solicitações de acesso</h2><p className="mt-1 text-xs text-slate-500">Revise novos cadastros e escolha o papel ao permitir o acesso.</p></div>
+                <div><h2 className="text-sm font-bold">Solicitações de acesso</h2><p className="mt-1 text-xs text-slate-500">Defina o perfil e o pacote individual antes de permitir o acesso.</p></div>
                 <span className="ml-auto rounded-full bg-amber-100 px-2.5 py-1 text-[10px] font-bold text-amber-800">{pendingAccounts.length} pendentes</span>
               </div>
               {pendingAccounts.length ? <div className="space-y-2">{pendingAccounts.map((account) => <div key={account.uid} className="flex flex-wrap items-center gap-3 rounded-xl border border-slate-100 p-3">
@@ -718,9 +812,70 @@ function App() {
                     <option value="admin">Administrador</option>
                   </select>
                 </label>
+                <div className="w-full pl-11">
+                  <UserPackageFields
+                    name={account.name}
+                    packageInfo={accountPackageDrafts[account.uid] || workspace.packageInfo}
+                    onChange={(packageInfo) => setAccountPackageDrafts((drafts) => ({ ...drafts, [account.uid]: packageInfo }))}
+                  />
+                </div>
                 <button onClick={() => void handleAccountDecision(account, false)} className="rounded-lg border border-rose-200 px-3 py-2 text-[10px] font-semibold text-rose-700 hover:bg-rose-50">Recusar</button>
                 <button onClick={() => void handleAccountDecision(account, true)} className="rounded-lg bg-blue-600 px-3 py-2 text-[10px] font-semibold text-white hover:bg-blue-700">Permitir acesso</button>
               </div>)}</div> : <p className="rounded-xl bg-slate-50 px-4 py-5 text-center text-xs text-slate-500">Não há solicitações aguardando aprovação.</p>}
+            </div>
+            <div className="mt-5 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm md:p-6">
+              <div className="mb-4 flex flex-wrap items-center gap-3">
+                <span className="rounded-lg bg-blue-50 p-2 text-blue-700"><Users size={18} /></span>
+                <div><h2 className="text-sm font-bold">Usuários da empresa</h2><p className="mt-1 text-xs text-slate-500">Consulte os dados, o pacote ativo e as reservas de cada pessoa.</p></div>
+                <span className="ml-auto rounded-full bg-slate-100 px-2.5 py-1 text-[10px] font-semibold">{companyAccounts.length} usuários</span>
+              </div>
+              <label className="relative mb-4 block max-w-md">
+                <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                <input type="search" value={accountSearch} onChange={(event) => setAccountSearch(event.target.value)} placeholder="Buscar por nome ou e-mail" aria-label="Buscar usuários por nome ou e-mail" className="form-input pl-9" />
+              </label>
+              {filteredAccounts.length ? <div className="space-y-2">{filteredAccounts.map((account) => {
+                const bookings = workspace.reservations
+                  .filter((booking) => booking.userId === account.uid)
+                  .sort((left, right) => right.date.localeCompare(left.date))
+                const activeBookings = bookings.filter((booking) => booking.status === 'confirmed')
+                const assignedPackage = accountPackage(account, workspace.packageInfo)
+                const packageDraft = accountPackageDrafts[account.uid] || assignedPackage
+                const accountUsage = activeBookings
+                  .filter((booking) => booking.date.slice(0, 7) === selectedMonth)
+                  .reduce((total, booking) => total + booking.hours, 0)
+                return <details key={account.uid} className="rounded-xl border border-slate-100">
+                  <summary className="flex cursor-pointer list-none flex-wrap items-center gap-3 p-3">
+                    <Avatar name={account.name} />
+                    <span className="min-w-37.5 flex-1"><span className="block text-xs font-semibold">{account.name}</span><span className="mt-0.5 block text-[10px] text-slate-500">{account.email}</span></span>
+                    <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[10px] font-medium text-slate-600">{account.role === 'admin' ? 'Administrador' : 'Usuário'}</span>
+                    <span className="rounded-full bg-blue-50 px-2.5 py-1 text-[10px] font-medium text-blue-700">{activeBookings.length} reservas ativas</span>
+                  </summary>
+                  <div className="grid gap-4 border-t border-slate-100 p-4 md:grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)]">
+                    <div className="space-y-3">
+                      <div><div className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">Informações da conta</div><div className="mt-2 space-y-2 text-xs text-slate-600"><div className="flex items-center gap-2"><span className="font-medium text-slate-800">E-mail</span>{account.email}</div><div><span className="font-medium text-slate-800">Perfil</span> · {account.role === 'admin' ? 'Administrador' : 'Usuário'}</div><div><span className="font-medium text-slate-800">Acesso</span> · Ativo</div></div></div>
+                      <div className="rounded-lg bg-blue-50 p-3"><div className="text-[10px] font-semibold uppercase tracking-wide text-blue-700">Pacote individual</div><div className="mt-1 text-xs font-semibold text-slate-800">{assignedPackage.label}</div><div className="mt-0.5 text-[10px] text-slate-600">{assignedPackage.monthlyHours} horas por mês · saldo em {monthLabel(date)}: {Math.max(0, assignedPackage.monthlyHours - accountUsage).toLocaleString('pt-BR', { maximumFractionDigits: 1 })} h</div></div>
+                      <div className="rounded-lg border border-slate-100 p-3">
+                        <div className="mb-2 text-[10px] font-semibold uppercase tracking-wide text-slate-400">Editar pacote</div>
+                        <UserPackageFields
+                          name={account.name}
+                          packageInfo={packageDraft}
+                          onChange={(packageInfo) => setAccountPackageDrafts((drafts) => ({ ...drafts, [account.uid]: packageInfo }))}
+                        />
+                        <button onClick={() => void handleSaveAccountPackage(account, packageDraft)} className="mt-3 rounded-lg bg-blue-600 px-3 py-2 text-[10px] font-semibold text-white hover:bg-blue-700">Salvar pacote</button>
+                      </div>
+                    </div>
+                    <div>
+                      <div className="mb-2 flex items-center justify-between"><div className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">Reservas</div><span className="text-[10px] text-slate-500">{bookings.length} no total</span></div>
+                      {bookings.length ? <div className="max-h-52 space-y-2 overflow-y-auto">{bookings.map((booking) => <div key={booking.id} className="flex flex-wrap items-center gap-2 rounded-lg bg-slate-50 px-3 py-2">
+                        <CalendarDays size={14} className="shrink-0 text-slate-400" />
+                        <span className="min-w-25 flex-1 text-[11px] font-semibold text-slate-700">{booking.roomName} · {shortDate(booking.date)}</span>
+                        <span className="text-[10px] text-slate-500">{formatRanges(booking.blocks).map((range) => `${range.start}–${range.end}`).join(', ')} · {booking.hours} h</span>
+                        <span className={`rounded px-1.5 py-0.5 text-[9px] font-semibold ${booking.status === 'confirmed' ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-200 text-slate-600'}`}>{booking.status === 'confirmed' ? 'Confirmada' : 'Cancelada'}</span>
+                      </div>)}</div> : <p className="rounded-lg bg-slate-50 px-3 py-4 text-center text-[11px] text-slate-500">Este usuário ainda não tem reservas.</p>}
+                    </div>
+                  </div>
+                </details>
+              })}</div> : <p className="rounded-xl bg-slate-50 px-4 py-5 text-center text-xs text-slate-500">{accountSearch ? 'Nenhum usuário encontrado para essa busca.' : 'Ainda não há usuários com acesso aprovado.'}</p>}
             </div>
             <div className="mt-5 grid gap-5 xl:grid-cols-2">
               <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm md:p-6">
@@ -753,12 +908,12 @@ function App() {
 
               <div className="space-y-5">
                 <form onSubmit={handleSavePackage} className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm md:p-6">
-                  <div className="mb-5 flex items-start justify-between"><div><h2 className="text-sm font-bold">Pacote mensal</h2><p className="mt-1 text-xs text-slate-500">Horas compartilhadas entre os usuários da empresa</p></div><span className="rounded-lg bg-blue-50 p-2 text-blue-600"><Sparkles size={17} /></span></div>
+                  <div className="mb-5 flex items-start justify-between"><div><h2 className="text-sm font-bold">Pacote padrão</h2><p className="mt-1 text-xs text-slate-500">Usado por contas sem pacote individual atribuído</p></div><span className="rounded-lg bg-blue-50 p-2 text-blue-600"><Sparkles size={17} /></span></div>
                   <label className="form-label">Nome do pacote<input name="label" defaultValue={workspace.packageInfo.label} required className="form-input mt-1.5" /></label>
                   <label className="form-label mt-3 block">Horas incluídas por mês<input name="monthlyHours" type="number" min="0" step="0.5" defaultValue={workspace.packageInfo.monthlyHours} required className="form-input mt-1.5" /></label>
-                  <div className="mt-4 rounded-lg bg-slate-50 px-3 py-2.5 text-xs text-slate-600">Consumo atual em {monthLabel(date)}: <strong>{currentUsage.toLocaleString('pt-BR', { maximumFractionDigits: 1 })} h</strong> · Disponível: <strong>{remaining.toLocaleString('pt-BR', { maximumFractionDigits: 1 })} h</strong></div>
-                  <button className="mt-4 rounded-lg bg-blue-600 px-4 py-2.5 text-xs font-semibold text-white hover:bg-blue-700">Salvar pacote</button>
-                  <p className="mt-3 text-[10px] leading-4 text-slate-400">Renovações e pagamentos são feitos fora da aplicação. Atualize o limite após confirmar a renovação.</p>
+                  <div className="mt-4 rounded-lg bg-slate-50 px-3 py-2.5 text-xs text-slate-600">Consumo total da empresa em {monthLabel(date)}: <strong>{companyCurrentUsage.toLocaleString('pt-BR', { maximumFractionDigits: 1 })} h</strong></div>
+                  <button className="mt-4 rounded-lg bg-blue-600 px-4 py-2.5 text-xs font-semibold text-white hover:bg-blue-700">Salvar pacote padrão</button>
+                  <p className="mt-3 text-[10px] leading-4 text-slate-400">Renovações e pagamentos são feitos fora da aplicação. Alterar o padrão não substitui pacotes já atribuídos individualmente.</p>
                 </form>
 
                 <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm md:p-6">
@@ -787,6 +942,40 @@ function initials(name: string) {
 
 function Avatar({ name }: { name: string }) {
   return <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-violet-100 text-[10px] font-bold text-violet-700">{initials(name)}</span>
+}
+
+function UserPackageFields({
+  name,
+  packageInfo,
+  onChange,
+}: {
+  name: string
+  packageInfo: PackageInfo
+  onChange: (packageInfo: PackageInfo) => void
+}) {
+  return <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_140px]">
+    <label className="form-label">Pacote de {name}
+      <input
+        aria-label={`Nome do pacote de ${name}`}
+        value={packageInfo.label}
+        onChange={(event) => onChange({ ...packageInfo, label: event.target.value })}
+        required
+        className="form-input mt-1"
+      />
+    </label>
+    <label className="form-label">Horas por mês
+      <input
+        aria-label={`Horas mensais de ${name}`}
+        type="number"
+        min="0"
+        step="0.5"
+        value={packageInfo.monthlyHours}
+        onChange={(event) => onChange({ ...packageInfo, monthlyHours: Number(event.target.value) })}
+        required
+        className="form-input mt-1"
+      />
+    </label>
+  </div>
 }
 
 function SideLink({ active, icon, label, count, onClick }: { active: boolean; icon: ReactNode; label: string; count?: number; onClick: () => void }) {

@@ -22,8 +22,8 @@ Sem credenciais Firebase, o app abre em **modo demonstração**. As reservas de 
    firebase deploy --only firestore:rules
    ```
 
-5. Crie a primeira conta pelo formulário da aplicação. No Firebase Console, localize `users/{uid}` e altere `role` para `admin` e `status` para `approved`. Essa promoção inicial é manual; depois, administradores aprovados podem analisar solicitações na área **Gestão** e escolher se cada conta será usuário ou administrador.
-6. Entre novamente na aplicação e, em **Gestão**, cadastre as salas e o pacote mensal. O pacote é salvo em `companies/{companyId}/packages/active`.
+5. Crie a primeira conta pelo formulário da aplicação. No Firebase Console, localize `users/{uid}` e altere `role` para `admin` e `status` para `approved`. Essa promoção inicial é manual; depois, administradores aprovados podem analisar solicitações na área **Gestão**, escolher o papel e definir o nome e as horas mensais do pacote individual antes de liberar o acesso.
+6. Entre novamente na aplicação e, em **Gestão**, cadastre as salas e configure o pacote padrão para contas sem pacote individual. Cada usuário aprovado pode receber um pacote próprio, que também pode ser alterado na ficha do usuário.
 7. Reinicie o Vite após alterar variáveis de ambiente:
 
    ```bash
@@ -35,22 +35,23 @@ As variáveis `VITE_*` são incluídas no bundle do navegador. As credenciais do
 ## Como funciona
 
 - A disponibilidade é organizada em blocos de 30 minutos. Use **Adicionar intervalo contínuo** para reservar entre um horário inicial e final (o final não é incluído, então 14:00–15:00 bloqueia 14:00 e 14:30), ou selecione blocos individuais para combinar períodos separados da mesma sala e data.
-- O cliente confirma a reserva em uma transação Firestore: cria a reserva, bloqueia os documentos determinísticos em `roomSlots` e atualiza o consumo mensal compartilhado.
+- O cliente confirma a reserva em uma transação Firestore: cria a reserva, bloqueia os documentos determinísticos em `roomSlots` e atualiza o consumo mensal agregado da empresa e o consumo individual do usuário.
 - Reservas concorrentes para o mesmo horário são recusadas pela transação se o bloco já tiver sido ocupado.
-- O limite inicial, quando o documento do pacote ainda não existe, é 50 horas. Cadastre o pacote na área administrativa antes do uso real para definir o limite oficial.
+- O limite é aplicado por usuário. Contas sem pacote individual usam o pacote padrão da empresa; se nenhum pacote padrão existir, o limite é de 50 horas. Administradores aprovados inicializam automaticamente o saldo mensal individual de contas existentes ao sincronizar a Gestão.
 - Cancelar uma reserva futura libera os blocos e devolve as horas ao mês em que a reserva foi feita.
-- Novos cadastros ficam com estado pendente e não podem acessar as funcionalidades da plataforma até a aprovação. Administradores recebem um aviso dentro do app e podem aprovar escolhendo o papel ou recusar o acesso.
+- Novos cadastros ficam com estado pendente e não podem acessar as funcionalidades da plataforma até a aprovação. Administradores recebem um aviso dentro do app e podem aprovar escolhendo o papel e o pacote individual, ou recusar o acesso.
 - Pagamentos e renovações acontecem fora do app. Quando o saldo não cobre a solicitação, a aplicação mostra o contato pelo WhatsApp; o destino deve ser configurado em `VITE_WHATSAPP_NUMBER`.
 - O papel do administrador é controlado pelo documento de perfil no Firestore. As regras deixam usuários comuns criarem o próprio perfil apenas com o papel `user`.
 
 ## Coleções do Firestore
 
-- `users/{uid}` — perfil, papel, empresa e estado de acesso (`pending`, `approved` ou `rejected`).
+- `users/{uid}` — perfil, papel, empresa, estado de acesso (`pending`, `approved` ou `rejected`) e pacote individual opcional (`packageLabel`, `monthlyHours`).
 - `rooms/{roomId}` — sala, capacidade, horários e empresa.
 - `reservations/{reservationId}` — proprietário, data, sala, blocos, duração e estado.
 - `roomSlots/{roomId_date_horário}` — bloqueio de um intervalo de 30 minutos.
-- `companies/{companyId}/packages/active` — nome e limite mensal de horas.
-- `companies/{companyId}/monthlyUsage/{AAAA-MM}` — consumo mensal compartilhado.
+- `companies/{companyId}/packages/active` — pacote padrão (nome e limite mensal de horas) para contas sem pacote individual.
+- `companies/{companyId}/monthlyUsage/{AAAA-MM}` — consumo mensal agregado da empresa.
+- `companies/{companyId}/userMonthlyUsage/{uid_AAAA-MM}` — saldo mensal utilizado por cada usuário, vinculado às reservas e validado contra o pacote individual.
 
 As regras impedem perfis pendentes ou recusados de acessar os dados da empresa, evitam que usuários comuns alterem o próprio papel ou perfis de terceiros, limitam as gravações à empresa e vinculam as alterações de consumo às reservas da transação. A conta de autenticação é criada ao enviar o pedido, mas o acesso ao app só é liberado após aprovação. Como a aplicação não possui código confiável no servidor, mantenha as regras publicadas e revise-as antes de ampliar os fluxos ou permitir operações privilegiadas adicionais.
 
