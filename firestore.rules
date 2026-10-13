@@ -42,13 +42,19 @@ service cloud.firestore {
         );
     }
 
-    function validReservation(company, reservationId) {
+    function userUsageWithinPackage(company, booking) {
       let usagePath = userUsagePath(
         company,
-        request.resource.data.userId,
-        request.resource.data.date.substr(0, 7)
+        booking.userId,
+        booking.date.substr(0, 7)
       );
-      let usage = getAfter(usagePath).data;
+      let hoursUsed = exists(usagePath) ? get(usagePath).data.hoursUsed : 0;
+      return hoursUsed is number
+        && hoursUsed >= 0
+        && hoursUsed + booking.hours <= userPackageLimit(company, booking.userId);
+    }
+
+    function validReservation(company) {
       return request.resource.data.keys().hasOnly([
           'userId', 'userName', 'companyId', 'roomId', 'roomName',
           'date', 'blocks', 'slotKeys', 'hours', 'status', 'createdAt'
@@ -72,12 +78,7 @@ service cloud.firestore {
         && request.resource.data.slotKeys.size() == request.resource.data.blocks.size()
         && request.resource.data.hours == request.resource.data.blocks.size() * 0.5
         && request.resource.data.createdAt is number
-        && existsAfter(usagePath)
-        && usage.userId == request.resource.data.userId
-        && usage.month == request.resource.data.date.substr(0, 7)
-        && usage.lastReservationId == reservationId
-        && usage.hoursUsed is number
-        && usage.hoursUsed <= userPackageLimit(company, request.resource.data.userId);
+        && userUsageWithinPackage(company, request.resource.data);
     }
 
     function usageMatchesBookingMonth(company, booking) {
@@ -263,7 +264,7 @@ service cloud.firestore {
     match /reservations/{reservationId} {
       allow read: if sameCompany(resource.data.companyId);
       allow create: if sameCompany(request.resource.data.companyId)
-        && validReservation(request.resource.data.companyId, reservationId);
+        && validReservation(request.resource.data.companyId);
       allow update: if sameCompany(resource.data.companyId)
         && (
           isAdmin(resource.data.companyId)

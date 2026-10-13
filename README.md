@@ -19,7 +19,7 @@ Sem credenciais Firebase, o app abre em **modo demonstração**. As reservas de 
 4. Publique as regras em `firestore.rules` no Firebase Console ou com Firebase CLI:
 
    ```bash
-   firebase deploy --only firestore:rules
+   firebase deploy --only firestore:rules --project reservas-ninna
    ```
 
 5. Crie a primeira conta pelo formulário da aplicação. No Firebase Console, localize `users/{uid}` e altere `role` para `admin` e `status` para `approved`. Essa promoção inicial é manual; depois, administradores aprovados podem analisar solicitações na área **Gestão**, escolher o papel e definir o nome e as horas mensais do pacote individual antes de liberar o acesso.
@@ -35,7 +35,7 @@ As variáveis `VITE_*` são incluídas no bundle do navegador. As credenciais do
 ## Como funciona
 
 - A disponibilidade é organizada em blocos de 30 minutos. Use **Adicionar intervalo contínuo** para reservar entre um horário inicial e final (o final não é incluído, então 14:00–15:00 bloqueia 14:00 e 14:30), ou selecione blocos individuais para combinar períodos separados da mesma sala e data.
-- O cliente confirma a reserva em uma transação Firestore: cria a reserva, bloqueia os documentos determinísticos em `roomSlots` e atualiza o consumo mensal agregado da empresa e o consumo individual do usuário.
+- O cliente confirma a reserva em uma transação Firestore: cria a reserva, bloqueia os documentos determinísticos em `roomSlots` e atualiza o consumo mensal individual do usuário. O consumo agregado da empresa é calculado a partir das reservas confirmadas.
 - Reservas concorrentes para o mesmo horário são recusadas pela transação se o bloco já tiver sido ocupado.
 - O limite é aplicado por usuário. Contas sem pacote individual usam o pacote padrão da empresa; se nenhum pacote padrão existir, o limite é de 50 horas. Administradores aprovados inicializam automaticamente o saldo mensal individual de contas existentes ao sincronizar a Gestão.
 - Cancelar uma reserva futura libera os blocos e devolve as horas ao mês em que a reserva foi feita.
@@ -50,8 +50,8 @@ As variáveis `VITE_*` são incluídas no bundle do navegador. As credenciais do
 - `reservations/{reservationId}` — proprietário, data, sala, blocos, duração e estado.
 - `roomSlots/{roomId_date_horário}` — bloqueio de um intervalo de 30 minutos.
 - `companies/{companyId}/packages/active` — pacote padrão (nome e limite mensal de horas) para contas sem pacote individual.
-- `companies/{companyId}/monthlyUsage/{AAAA-MM}` — consumo mensal agregado da empresa.
-- `companies/{companyId}/userMonthlyUsage/{uid_AAAA-MM}` — saldo mensal utilizado por cada usuário, vinculado às reservas e validado contra o pacote individual.
+- `companies/{companyId}/monthlyUsage/{AAAA-MM}` — consumo agregado legado; o painel atual calcula o agregado diretamente das reservas.
+- `companies/{companyId}/userMonthlyUsage/{uid_AAAA-MM}` — consumo mensal utilizado por cada usuário, vinculado às reservas e validado contra o pacote individual.
 
 As regras impedem perfis pendentes ou recusados de acessar os dados da empresa, evitam que usuários comuns alterem o próprio papel ou perfis de terceiros, limitam as gravações à empresa e vinculam as alterações de consumo às reservas da transação. A conta de autenticação é criada ao enviar o pedido, mas o acesso ao app só é liberado após aprovação. Como a aplicação não possui código confiável no servidor, mantenha as regras publicadas e revise-as antes de ampliar os fluxos ou permitir operações privilegiadas adicionais.
 

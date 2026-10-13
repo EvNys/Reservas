@@ -171,7 +171,6 @@ function App() {
   const [busy, setBusy] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [authError, setAuthError] = useState('')
-  const [usageSnapshot, setUsageSnapshot] = useState<{ month: string; hoursUsed: number } | null>(null)
   const [reservationsSnapshot, setReservationsSnapshot] = useState<string | null>(null)
   const initializedUsage = useRef(new Set<string>())
   const selectedMonth = date.slice(0, 7)
@@ -268,8 +267,6 @@ function App() {
         profile.companyId,
         (incoming) => setWorkspace((old) => ({ ...old, ...incoming })),
         (error) => setToast(`Erro ao sincronizar: ${error.message}`),
-        selectedMonth,
-        (hoursUsed) => setUsageSnapshot({ month: selectedMonth, hoursUsed }),
         () => setReservationsSnapshot(`${profile.companyId}_${selectedMonth}`),
       )
     }).catch((error: unknown) => setToast(`Erro ao conectar ao Firebase: ${errorMessage(error)}`))
@@ -313,11 +310,9 @@ function App() {
   const currentUsage = workspace.reservations
     .filter((booking) => booking.userId === profile?.uid && booking.date.slice(0, 7) === selectedMonth && booking.status === 'confirmed')
     .reduce((total, booking) => total + booking.hours, 0)
-  const companyCurrentUsage = usageSnapshot?.month === selectedMonth
-    ? usageSnapshot.hoursUsed
-    : workspace.reservations
-      .filter((booking) => booking.date.slice(0, 7) === selectedMonth && booking.status === 'confirmed')
-      .reduce((total, booking) => total + booking.hours, 0)
+  const companyCurrentUsage = workspace.reservations
+    .filter((booking) => booking.date.slice(0, 7) === selectedMonth && booking.status === 'confirmed')
+    .reduce((total, booking) => total + booking.hours, 0)
   const remaining = Math.max(0, userPackage.monthlyHours - currentUsage)
   const bookingHours = selectedBlocks.length * 0.5
   const occupiedBlocks = new Set(
@@ -932,6 +927,9 @@ function App() {
 }
 
 function errorMessage(error: unknown) {
+  if (error && typeof error === 'object' && 'code' in error && error.code === 'permission-denied') {
+    return 'O Firestore bloqueou a gravação (403). Confirme se as regras atualizadas estão publicadas no mesmo projeto Firebase usado pela aplicação.'
+  }
   if (error instanceof Error) return error.message
   return 'Não foi possível concluir a operação.'
 }

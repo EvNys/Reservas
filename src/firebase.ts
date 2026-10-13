@@ -223,8 +223,6 @@ export function subscribeToWorkspace(
   company: string,
   onData: (data: Partial<WorkspaceData>) => void,
   onError: (error: Error) => void,
-  usageMonth = monthKey(),
-  onUsage: (hoursUsed: number) => void = () => undefined,
   onReservationsLoaded: () => void = () => undefined,
 ) {
   if (!db) return () => undefined
@@ -249,11 +247,6 @@ export function subscribeToWorkspace(
     onSnapshot(doc(db, 'companies', company, 'packages', 'active'), (snapshot) => {
       const data = snapshot.data()
       onData({ packageInfo: data ? { monthlyHours: data.monthlyHours, label: data.label || 'Plano mensal' } : { monthlyHours: 50, label: 'Plano mensal' } })
-    }, onError),
-    onSnapshot(doc(db, 'companies', company, 'monthlyUsage', usageMonth), (snapshot) => {
-      const hoursUsed = snapshot.exists() ? Number(snapshot.data().hoursUsed || 0) : 0
-      onData({ hoursUsed })
-      onUsage(hoursUsed)
     }, onError),
   ]
   return () => unsubscribe.forEach((stop) => stop())
@@ -280,7 +273,6 @@ export async function createReservation(
   const bookingId = doc(collection(db, 'reservations')).id
   const bookingRef = doc(db, 'reservations', bookingId)
   const usageMonth = monthKey(new Date(`${date}T12:00:00`))
-  const usageRef = doc(db, 'companies', profile.companyId, 'monthlyUsage', usageMonth)
   const userUsageRef = doc(db, 'companies', profile.companyId, 'userMonthlyUsage', `${profile.uid}_${usageMonth}`)
   const profileRef = doc(db, 'users', profile.uid)
   const packageRef = doc(db, 'companies', profile.companyId, 'packages', 'active')
@@ -289,8 +281,7 @@ export async function createReservation(
 
   await runTransaction(db, async (transaction) => {
     const slotSnapshots = await Promise.all(slotRefs.map((reference) => transaction.get(reference)))
-    const [usageSnapshot, userUsageSnapshot, profileSnapshot, packageSnapshot] = await Promise.all([
-      transaction.get(usageRef),
+    const [userUsageSnapshot, profileSnapshot, packageSnapshot] = await Promise.all([
       transaction.get(userUsageRef),
       transaction.get(profileRef),
       transaction.get(packageRef),
@@ -303,8 +294,6 @@ export async function createReservation(
     if (hoursUsed + hours > monthlyHours) {
       throw new Error(`Saldo insuficiente. Restam ${Math.max(0, monthlyHours - hoursUsed).toFixed(1)} horas neste mês.`)
     }
-    const companyHoursUsed = Number(usageSnapshot.data()?.hoursUsed ?? 0)
-
     const reservation: Omit<Reservation, 'id'> = {
       userId: profile.uid,
       userName: profile.name,
@@ -326,12 +315,6 @@ export async function createReservation(
       date,
       time: sortedBlocks[index],
     }))
-    transaction.set(usageRef, {
-      month: usageMonth,
-      hoursUsed: companyHoursUsed + hours,
-      lastReservationId: bookingId,
-      companyId: profile.companyId,
-    })
     transaction.set(userUsageRef, {
       month: usageMonth,
       hoursUsed: hoursUsed + hours,
@@ -346,29 +329,20 @@ export async function cancelReservation(reservation: Reservation) {
   if (!db) throw new Error('Firebase não está configurado.')
   const bookingRef = doc(db, 'reservations', reservation.id)
   const usageMonth = monthKey(new Date(`${reservation.date}T12:00:00`))
-  const usageRef = doc(db, 'companies', reservation.companyId, 'monthlyUsage', usageMonth)
   const userUsageRef = doc(db, 'companies', reservation.companyId, 'userMonthlyUsage', `${reservation.userId}_${usageMonth}`)
   const slotRefs = reservation.blocks.map((time) => doc(db!, 'roomSlots', slotId(reservation.roomId, reservation.date, time)))
 
   await runTransaction(db, async (transaction) => {
-    const [bookingSnapshot, usageSnapshot, userUsageSnapshot] = await Promise.all([
+    const [bookingSnapshot, userUsageSnapshot] = await Promise.all([
       transaction.get(bookingRef),
-      transaction.get(usageRef),
       transaction.get(userUsageRef),
     ])
     await Promise.all(slotRefs.map((reference) => transaction.get(reference)))
     if (!bookingSnapshot.exists() || bookingSnapshot.data()?.status !== 'confirmed') {
       throw new Error('Esta reserva não está mais ativa.')
     }
-    const companyHoursUsed = Number(usageSnapshot.data()?.hoursUsed ?? 0)
     const userHoursUsed = Number(userUsageSnapshot.data()?.hoursUsed ?? 0)
     transaction.update(bookingRef, { status: 'cancelled' })
-    transaction.set(usageRef, {
-      month: usageMonth,
-      hoursUsed: Math.max(0, companyHoursUsed - reservation.hours),
-      lastReservationId: reservation.id,
-      companyId: reservation.companyId,
-    })
     if (userUsageSnapshot.exists()) {
       transaction.set(userUsageRef, {
         month: usageMonth,
