@@ -163,6 +163,7 @@ function App() {
   const [accountPackageDrafts, setAccountPackageDrafts] = useState<Record<string, PackageInfo>>({})
   const [accountSearch, setAccountSearch] = useState('')
   const [companyAccountsSnapshot, setCompanyAccountsSnapshot] = useState<string | null>(firebaseEnabled ? null : companyId)
+  const isHubAdmin = profile?.role === 'admin' && profile.companyId === companyId
   const [view, setView] = useState<View>('reserve')
   const [date, setDate] = useState(today)
   const [selectedRoom, setSelectedRoom] = useState('')
@@ -218,7 +219,7 @@ function App() {
   }, [])
 
   useEffect(() => {
-    if (!firebaseEnabled || profile?.role !== 'admin' || profile.status === 'pending' || profile.status === 'rejected') return
+    if (!firebaseEnabled || profile?.role !== 'admin' || profile.companyId !== companyId || profile.status === 'pending' || profile.status === 'rejected') return
     let unsubscribe: () => void = () => {}
     let cancelled = false
     void import('./firebase').then(({ subscribeToPendingAccounts }) => {
@@ -237,7 +238,7 @@ function App() {
   }, [profile])
 
   useEffect(() => {
-    if (!firebaseEnabled || profile?.role !== 'admin' || profile.status === 'pending' || profile.status === 'rejected') return
+    if (!firebaseEnabled || profile?.role !== 'admin' || profile.companyId !== companyId || profile.status === 'pending' || profile.status === 'rejected') return
     let unsubscribe: () => void = () => {}
     let cancelled = false
     void import('./firebase').then(({ subscribeToCompanyAccounts }) => {
@@ -264,10 +265,10 @@ function App() {
     void import('./firebase').then(({ subscribeToWorkspace }) => {
       if (cancelled) return
       unsubscribe = subscribeToWorkspace(
-        profile.companyId,
+        companyId,
         (incoming) => setWorkspace((old) => ({ ...old, ...incoming })),
         (error) => setToast(`Erro ao sincronizar: ${error.message}`),
-        () => setReservationsSnapshot(`${profile.companyId}_${selectedMonth}`),
+        () => setReservationsSnapshot(`${companyId}_${selectedMonth}`),
       )
     }).catch((error: unknown) => setToast(`Erro ao conectar ao Firebase: ${errorMessage(error)}`))
     return () => {
@@ -279,20 +280,21 @@ function App() {
   useEffect(() => {
     if (!firebaseEnabled
       || profile?.role !== 'admin'
+      || profile.companyId !== companyId
       || companyAccountsSnapshot !== profile.companyId
-      || reservationsSnapshot !== `${profile.companyId}_${selectedMonth}`) return
+      || reservationsSnapshot !== `${companyId}_${selectedMonth}`) return
     const monthReservations = workspace.reservations.filter(
       (booking) => booking.date.slice(0, 7) === selectedMonth && booking.status === 'confirmed',
     )
     void import('./firebase').then(({ initializeUserMonthlyUsage }) => {
       companyAccounts.forEach((account) => {
-        const key = `${profile.companyId}_${account.uid}_${selectedMonth}`
+        const key = `${companyId}_${account.uid}_${selectedMonth}`
         if (initializedUsage.current.has(key)) return
         initializedUsage.current.add(key)
         const hoursUsed = monthReservations
           .filter((booking) => booking.userId === account.uid)
           .reduce((total, booking) => total + booking.hours, 0)
-        void initializeUserMonthlyUsage(profile.companyId, account.uid, selectedMonth, hoursUsed)
+        void initializeUserMonthlyUsage(companyId, account.uid, selectedMonth, hoursUsed)
           .catch((error: unknown) => {
             initializedUsage.current.delete(key)
             setToast(`Erro ao sincronizar o saldo de ${account.name}: ${errorMessage(error)}`)
@@ -620,7 +622,7 @@ function App() {
         <nav className="space-y-1">
           <SideLink active={view === 'reserve'} icon={<CalendarDays size={18} />} label="Reservar espaço" onClick={() => { setView('reserve'); setSidebarOpen(false) }} />
           <SideLink active={view === 'mine'} icon={<LayoutDashboard size={18} />} label="Minhas reservas" count={userReservations.length || undefined} onClick={() => { setView('mine'); setSidebarOpen(false) }} />
-          {profile.role === 'admin' && <SideLink active={view === 'manage'} icon={<Settings2 size={18} />} label="Gestão" count={pendingAccounts.length || undefined} onClick={() => { setView('manage'); setSidebarOpen(false) }} />}
+          {isHubAdmin && <SideLink active={view === 'manage'} icon={<Settings2 size={18} />} label="Gestão" count={pendingAccounts.length || undefined} onClick={() => { setView('manage'); setSidebarOpen(false) }} />}
         </nav>
 
         <div className="mt-9 mb-3 px-3 text-[10px] font-bold uppercase tracking-[0.17em] text-slate-400">Sua empresa</div>
@@ -790,7 +792,7 @@ function App() {
             </div>
           </section>}
 
-          {view === 'manage' && profile.role === 'admin' && <section>
+          {view === 'manage' && isHubAdmin && <section>
             <PageHeading eyebrow="ADMINISTRAÇÃO" title="Gestão dos espaços" description="Gerencie usuários, seus pacotes individuais, reservas e salas." />
             <div className="mt-6 rounded-2xl border border-amber-200 bg-white p-5 shadow-sm md:p-6">
               <div className="mb-4 flex items-center gap-3">

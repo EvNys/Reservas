@@ -272,20 +272,26 @@ export async function createReservation(
   if (sortedBlocks.length > 20) throw new Error('Selecione no máximo 20 blocos de 30 minutos por reserva.')
   const bookingId = doc(collection(db, 'reservations')).id
   const bookingRef = doc(db, 'reservations', bookingId)
+  const roomRef = doc(db, 'rooms', room.id)
   const usageMonth = monthKey(new Date(`${date}T12:00:00`))
-  const userUsageRef = doc(db, 'companies', profile.companyId, 'userMonthlyUsage', `${profile.uid}_${usageMonth}`)
+  const userUsageRef = doc(db, 'companies', room.companyId, 'userMonthlyUsage', `${profile.uid}_${usageMonth}`)
   const profileRef = doc(db, 'users', profile.uid)
-  const packageRef = doc(db, 'companies', profile.companyId, 'packages', 'active')
+  const packageRef = doc(db, 'companies', room.companyId, 'packages', 'active')
   const slotRefs = sortedBlocks.map((time) => doc(db!, 'roomSlots', slotId(room.id, date, time)))
   const hours = sortedBlocks.length * 0.5
 
   await runTransaction(db, async (transaction) => {
     const slotSnapshots = await Promise.all(slotRefs.map((reference) => transaction.get(reference)))
-    const [userUsageSnapshot, profileSnapshot, packageSnapshot] = await Promise.all([
+    const [roomSnapshot, userUsageSnapshot, profileSnapshot, packageSnapshot] = await Promise.all([
+      transaction.get(roomRef),
       transaction.get(userUsageRef),
       transaction.get(profileRef),
       transaction.get(packageRef),
     ])
+    const roomData = roomSnapshot.data()
+    if (!roomSnapshot.exists() || roomData?.active !== true || roomData.companyId !== room.companyId || typeof roomData.name !== 'string') {
+      throw new Error('A sala não está disponível para reservas.')
+    }
     if (slotSnapshots.some((snapshot) => snapshot.exists())) {
       throw new Error('Um ou mais horários acabaram de ser reservados. Atualize a agenda.')
     }
@@ -297,9 +303,9 @@ export async function createReservation(
     const reservation: Omit<Reservation, 'id'> = {
       userId: profile.uid,
       userName: profile.name,
-      companyId: profile.companyId,
+      companyId: roomData.companyId,
       roomId: room.id,
-      roomName: room.name,
+      roomName: roomData.name,
       date,
       blocks: sortedBlocks,
       slotKeys: sortedBlocks.map((time) => slotId(room.id, date, time)),
@@ -310,7 +316,7 @@ export async function createReservation(
     transaction.set(bookingRef, reservation)
     slotRefs.forEach((reference, index) => transaction.set(reference, {
       reservationId: bookingId,
-      companyId: profile.companyId,
+      companyId: roomData.companyId,
       roomId: room.id,
       date,
       time: sortedBlocks[index],

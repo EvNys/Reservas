@@ -27,19 +27,21 @@ service cloud.firestore {
       return /databases/$(database)/documents/reservations/$(bookingId);
     }
 
+    function roomPath(roomId) {
+      return /databases/$(database)/documents/rooms/$(roomId);
+    }
+
     function userUsagePath(company, userId, month) {
       return /databases/$(database)/documents/companies/$(company)/userMonthlyUsage/$(userId + '_' + month);
     }
 
     function userPackageLimit(company, userId) {
       let userProfile = get(/databases/$(database)/documents/users/$(userId)).data;
+      let packagePath = /databases/$(database)/documents/companies/$(company)/packages/active;
+      let packageLimit = exists(packagePath) ? get(packagePath).data.monthlyHours : null;
       return ('monthlyHours' in userProfile && userProfile.monthlyHours is number)
         ? userProfile.monthlyHours
-        : (
-          exists(/databases/$(database)/documents/companies/$(company)/packages/active)
-            ? get(/databases/$(database)/documents/companies/$(company)/packages/active).data.monthlyHours
-            : 50
-        );
+        : (packageLimit is number ? packageLimit : 50);
     }
 
     function userUsageWithinPackage(company, booking) {
@@ -64,9 +66,13 @@ service cloud.firestore {
           'date', 'blocks', 'slotKeys', 'hours', 'status', 'createdAt'
         ])
         && request.resource.data.companyId == company
+        && request.resource.data.roomId is string
+        && exists(roomPath(request.resource.data.roomId))
+        && get(roomPath(request.resource.data.roomId)).data.companyId == company
+        && get(roomPath(request.resource.data.roomId)).data.active == true
+        && get(roomPath(request.resource.data.roomId)).data.name == request.resource.data.roomName
         && request.resource.data.userId == request.auth.uid
         && request.resource.data.userName == profile().name
-        && request.resource.data.roomId is string
         && request.resource.data.roomName is string
         && request.resource.data.status == 'confirmed'
         && request.resource.data.date is string
@@ -93,7 +99,7 @@ service cloud.firestore {
         && request.resource.data.keys().hasAll(['companyId', 'userId', 'month', 'hoursUsed'])
         && request.resource.data.companyId == company
         && exists(userPath)
-        && get(userPath).data.companyId == company
+        && (!('status' in get(userPath).data) || get(userPath).data.status == 'approved')
         && request.resource.data.userId is string
         && request.resource.data.month is string
         && request.resource.data.month.matches('^\\d{4}-\\d{2}$')
@@ -240,7 +246,7 @@ service cloud.firestore {
     }
 
     match /rooms/{roomId} {
-      allow read: if sameCompany(resource.data.companyId);
+      allow read: if profileIsApproved();
       allow create: if isAdmin(request.resource.data.companyId)
         && request.resource.data.active is bool
         && request.resource.data.capacity is int
@@ -262,32 +268,26 @@ service cloud.firestore {
     }
 
     match /reservations/{reservationId} {
-      allow read: if sameCompany(resource.data.companyId);
-      allow create: if sameCompany(request.resource.data.companyId)
+      allow read: if profileIsApproved();
+      allow create: if profileIsApproved()
         && validReservation(request.resource.data.companyId);
-      allow update: if sameCompany(resource.data.companyId)
+      allow update: if profileIsApproved()
+        && resource.data.status == 'confirmed'
+        && request.resource.data.status == 'cancelled'
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status'])
         && (
           isAdmin(resource.data.companyId)
-          || (
-            resource.data.userId == request.auth.uid
-            && resource.data.status == 'confirmed'
-            && request.resource.data.status == 'cancelled'
-            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status'])
-          )
+          || resource.data.userId == request.auth.uid
         );
       allow delete: if isAdmin(resource.data.companyId);
     }
 
     match /roomSlots/{slotId} {
-      allow get: if signedIn()
-        && (
-          !exists(/databases/$(database)/documents/roomSlots/$(slotId))
-          || sameCompany(resource.data.companyId)
-        );
-      allow list: if sameCompany(resource.data.companyId);
-      allow create: if sameCompany(request.resource.data.companyId)
+      allow get, list: if profileIsApproved();
+      allow create: if profileIsApproved()
         && existsAfter(bookingPath(request.resource.data.reservationId))
         && getAfter(bookingPath(request.resource.data.reservationId)).data.companyId == request.resource.data.companyId
+        && getAfter(bookingPath(request.resource.data.reservationId)).data.userId == request.auth.uid
         && getAfter(bookingPath(request.resource.data.reservationId)).data.status == 'confirmed'
         && getAfter(bookingPath(request.resource.data.reservationId)).data.roomId == request.resource.data.roomId
         && getAfter(bookingPath(request.resource.data.reservationId)).data.date == request.resource.data.date
@@ -295,21 +295,27 @@ service cloud.firestore {
         && getAfter(bookingPath(request.resource.data.reservationId)).data.slotKeys.hasAny([slotId])
         && request.resource.data.time.matches('^([01][0-9]|2[0-3]):(00|30)$')
         && slotId == request.resource.data.roomId + '_' + request.resource.data.date + '_' + request.resource.data.time
-        && get(/databases/$(database)/documents/rooms/$(request.resource.data.roomId)).data.companyId == request.resource.data.companyId
-        && get(/databases/$(database)/documents/rooms/$(request.resource.data.roomId)).data.active == true
-        && request.resource.data.time >= get(/databases/$(database)/documents/rooms/$(request.resource.data.roomId)).data.openTime
-        && request.resource.data.time < get(/databases/$(database)/documents/rooms/$(request.resource.data.roomId)).data.closeTime;
-      allow delete: if isAdmin(resource.data.companyId)
-        || (
-          sameCompany(resource.data.companyId)
-          && existsAfter(bookingPath(resource.data.reservationId))
-          && getAfter(bookingPath(resource.data.reservationId)).data.status == 'cancelled'
+        && exists(roomPath(request.resource.data.roomId))
+        && get(roomPath(request.resource.data.roomId)).data.companyId == request.resource.data.companyId
+        && get(roomPath(request.resource.data.roomId)).data.active == true
+        && request.resource.data.time >= get(roomPath(request.resource.data.roomId)).data.openTime
+        && request.resource.data.time < get(roomPath(request.resource.data.roomId)).data.closeTime;
+      allow delete: if profileIsApproved()
+        && existsAfter(bookingPath(resource.data.reservationId))
+        && getAfter(bookingPath(resource.data.reservationId)).data.companyId == resource.data.companyId
+        && getAfter(bookingPath(resource.data.reservationId)).data.roomId == resource.data.roomId
+        && getAfter(bookingPath(resource.data.reservationId)).data.date == resource.data.date
+        && getAfter(bookingPath(resource.data.reservationId)).data.blocks.hasAny([resource.data.time])
+        && getAfter(bookingPath(resource.data.reservationId)).data.status == 'cancelled'
+        && (
+          getAfter(bookingPath(resource.data.reservationId)).data.userId == request.auth.uid
+          || isAdmin(resource.data.companyId)
         );
       allow update: if false;
     }
 
     match /companies/{company}/packages/{packageId} {
-      allow read: if sameCompany(company);
+      allow read: if profileIsApproved();
       allow write: if isAdmin(company);
     }
 
@@ -321,34 +327,35 @@ service cloud.firestore {
     }
 
     match /companies/{company}/userMonthlyUsage/{usageId} {
-      allow read: if sameCompany(company)
+      allow read: if profileIsApproved()
         && (
           isAdmin(company)
-          || usageId.matches('^' + request.auth.uid + '_\\d{4}-\\d{2}$')
+          || (
+            resource.data.userId == request.auth.uid
+            && usageId.matches('^' + request.auth.uid + '_\\d{4}-\\d{2}$')
+          )
         );
       allow create: if (isAdmin(company) && validUserUsageSeed(company, usageId))
         || (
-          sameCompany(company)
+          profileIsApproved()
           && request.resource.data.keys().hasOnly([
             'companyId', 'userId', 'month', 'hoursUsed', 'lastReservationId'
           ])
           && request.resource.data.keys().hasAll(['companyId', 'userId', 'month', 'hoursUsed'])
+          && request.resource.data.userId == request.auth.uid
           && usageId == request.resource.data.userId + '_' + request.resource.data.month
           && request.resource.data.month.matches('^\\d{4}-\\d{2}$')
           && validUserUsageCreate(company)
         );
-      allow update: if isAdmin(company)
-        || (
-          sameCompany(company)
-          && resource.data.userId == request.auth.uid
-          && usageId == request.resource.data.userId + '_' + request.resource.data.month
-          && request.resource.data.month.matches('^\\d{4}-\\d{2}$')
-          && request.resource.data.keys().hasOnly([
-            'companyId', 'userId', 'month', 'hoursUsed', 'lastReservationId'
-          ])
-          && request.resource.data.keys().hasAll(['companyId', 'userId', 'month', 'hoursUsed', 'lastReservationId'])
-          && validUserUsageUpdate(company)
-        );
+      allow update: if profileIsApproved()
+        && (isAdmin(company) || resource.data.userId == request.auth.uid)
+        && usageId == request.resource.data.userId + '_' + request.resource.data.month
+        && request.resource.data.month.matches('^\\d{4}-\\d{2}$')
+        && request.resource.data.keys().hasOnly([
+          'companyId', 'userId', 'month', 'hoursUsed', 'lastReservationId'
+        ])
+        && request.resource.data.keys().hasAll(['companyId', 'userId', 'month', 'hoursUsed', 'lastReservationId'])
+        && validUserUsageUpdate(company);
       allow delete: if isAdmin(company);
     }
   }

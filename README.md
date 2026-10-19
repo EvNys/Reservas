@@ -15,7 +15,7 @@ Sem credenciais Firebase, o app abre em **modo demonstração**. As reservas de 
 
 1. Crie um projeto Firebase e habilite **Authentication → E-mail/senha**.
 2. Crie o Firestore Database.
-3. Copie `.env.example` para `.env.local` e preencha as credenciais da aplicação Web Firebase. Defina também `VITE_COMPANY_ID` (o mesmo valor para todos os usuários da empresa) e, opcionalmente, `VITE_WHATSAPP_NUMBER` com o número internacional, apenas dígitos.
+3. Copie `.env.example` para `.env.local` e preencha as credenciais da aplicação Web Firebase. Defina também `VITE_COMPANY_ID` com o ID da empresa proprietária do hub de salas (o mesmo valor para todos os usuários da aplicação) e, opcionalmente, `VITE_WHATSAPP_NUMBER` com o número internacional, apenas dígitos.
 4. Publique as regras em `firestore.rules` no Firebase Console ou com Firebase CLI:
 
    ```bash
@@ -34,10 +34,10 @@ As variáveis `VITE_*` são incluídas no bundle do navegador. As credenciais do
 
 ## Como funciona
 
-- A disponibilidade é organizada em blocos de 30 minutos. Use **Adicionar intervalo contínuo** para reservar entre um horário inicial e final (o final não é incluído, então 14:00–15:00 bloqueia 14:00 e 14:30), ou selecione blocos individuais para combinar períodos separados da mesma sala e data.
-- O cliente confirma a reserva em uma transação Firestore: cria a reserva, bloqueia os documentos determinísticos em `roomSlots` e atualiza o consumo mensal individual do usuário. O consumo agregado da empresa é calculado a partir das reservas confirmadas.
+- A disponibilidade é organizada em blocos de 30 minutos e compartilhada entre usuários aprovados, mesmo quando pertencem a empresas diferentes. Use **Adicionar intervalo contínuo** para reservar entre um horário inicial e final (o final não é incluído, então 14:00–15:00 bloqueia 14:00 e 14:30), ou selecione blocos individuais para combinar períodos separados da mesma sala e data.
+- O cliente confirma a reserva em uma transação Firestore: cria a reserva na empresa proprietária da sala, bloqueia os documentos determinísticos em `roomSlots` e atualiza o consumo mensal individual do usuário. O consumo agregado do hub é calculado a partir das reservas confirmadas.
 - Reservas concorrentes para o mesmo horário são recusadas pela transação se o bloco já tiver sido ocupado.
-- O limite é aplicado por usuário. Contas sem pacote individual usam o pacote padrão da empresa; se nenhum pacote padrão existir, o limite é de 50 horas. Administradores aprovados inicializam automaticamente o saldo mensal individual de contas existentes ao sincronizar a Gestão.
+- O limite é aplicado por usuário. Contas sem pacote individual usam o pacote padrão da empresa; se não houver um limite numérico válido, o limite é de 50 horas. Administradores aprovados inicializam automaticamente o saldo mensal individual de contas existentes ao sincronizar a Gestão.
 - Cancelar uma reserva futura libera os blocos e devolve as horas ao mês em que a reserva foi feita.
 - Novos cadastros ficam com estado pendente e não podem acessar as funcionalidades da plataforma até a aprovação. Administradores recebem um aviso dentro do app e podem aprovar escolhendo o papel e o pacote individual, ou recusar o acesso.
 - Pagamentos e renovações acontecem fora do app. Quando o saldo não cobre a solicitação, a aplicação mostra o contato pelo WhatsApp; o destino deve ser configurado em `VITE_WHATSAPP_NUMBER`.
@@ -47,13 +47,13 @@ As variáveis `VITE_*` são incluídas no bundle do navegador. As credenciais do
 
 - `users/{uid}` — perfil, papel, empresa, estado de acesso (`pending`, `approved` ou `rejected`) e pacote individual opcional (`packageLabel`, `monthlyHours`).
 - `rooms/{roomId}` — sala, capacidade, horários e empresa.
-- `reservations/{reservationId}` — proprietário, data, sala, blocos, duração e estado.
+- `reservations/{reservationId}` — usuário, empresa proprietária da sala, data, sala, blocos, duração e estado; a agenda é compartilhada entre usuários aprovados.
 - `roomSlots/{roomId_date_horário}` — bloqueio de um intervalo de 30 minutos.
 - `companies/{companyId}/packages/active` — pacote padrão (nome e limite mensal de horas) para contas sem pacote individual.
 - `companies/{companyId}/monthlyUsage/{AAAA-MM}` — consumo agregado legado; o painel atual calcula o agregado diretamente das reservas.
 - `companies/{companyId}/userMonthlyUsage/{uid_AAAA-MM}` — consumo mensal utilizado por cada usuário, vinculado às reservas e validado contra o pacote individual.
 
-As regras impedem perfis pendentes ou recusados de acessar os dados da empresa, evitam que usuários comuns alterem o próprio papel ou perfis de terceiros, limitam as gravações à empresa e vinculam as alterações de consumo às reservas da transação. A conta de autenticação é criada ao enviar o pedido, mas o acesso ao app só é liberado após aprovação. Como a aplicação não possui código confiável no servidor, mantenha as regras publicadas e revise-as antes de ampliar os fluxos ou permitir operações privilegiadas adicionais.
+As regras impedem perfis pendentes ou recusados de acessar salas e reservas, permitem que usuários aprovados compartilhem a agenda e reservem apenas em salas ativas do hub, e vinculam os bloqueios e o consumo às reservas da transação. Usuários comuns só podem cancelar as próprias reservas; apenas administradores do hub podem gerenciar salas, pacotes e cancelar reservas de terceiros. A conta de autenticação é criada ao enviar o pedido, mas o acesso ao app só é liberado após aprovação. Como a aplicação não possui código confiável no servidor, mantenha as regras publicadas e revise-as antes de ampliar os fluxos ou permitir operações privilegiadas adicionais.
 
 ## Verificação
 
