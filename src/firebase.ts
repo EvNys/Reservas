@@ -21,8 +21,9 @@ import {
   updateDoc,
   where,
 } from 'firebase/firestore'
+import { deleteObject, getBytes, getStorage, ref, uploadBytes } from 'firebase/storage'
 import type { User } from 'firebase/auth'
-import { companyId, firebaseConfig, firebaseEnabled } from './firebase-config'
+import { companyId, firebaseConfig, firebaseEnabled, storageEnabled } from './firebase-config'
 
 export type Room = {
   id: string
@@ -64,8 +65,23 @@ export type Company = {
   id: string
   name: string
   createdAt: number
+  cnpj?: string
+  legalRepresentative?: string
+  phone?: string
+  email?: string
+  observations?: string
   packageInfo?: PackageInfo
 }
+
+export type CompanyContract = {
+  id: string
+  name: string
+  size: number
+  storagePath: string
+  createdAt: number
+}
+
+export type NewCompany = Pick<Company, 'name' | 'cnpj' | 'legalRepresentative' | 'phone' | 'email' | 'observations'>
 
 export type AccessRequest = Profile & { status: 'pending' }
 
@@ -85,6 +101,7 @@ export const auth = firebaseEnabled
   ? getAuth(initializeApp(firebaseConfig))
   : null
 export const db = firebaseEnabled ? getFirestore() : null
+const storage = storageEnabled ? getStorage() : null
 
 export const signIn = (email: string, password: string) => {
   if (!auth) throw new Error('Firebase não está configurado.')
@@ -243,35 +260,116 @@ export async function ensureCompany(id: string, name: string) {
   const companyRef = doc(db, 'companies', id)
   await runTransaction(db, async (transaction) => {
     const snapshot = await transaction.get(companyRef)
-    if (!snapshot.exists()) transaction.set(companyRef, { name, createdAt: Date.now() })
+    if (!snapshot.exists()) transaction.set(companyRef, {
+      name,
+      createdAt: Date.now(),
+      cnpj: '',
+      legalRepresentative: '',
+      phone: '',
+      email: '',
+      observations: '',
+    })
   })
 }
 
-export async function createCompany(name: string): Promise<Company> {
+export async function createCompany(details: NewCompany): Promise<Company> {
   if (!db) throw new Error('Firebase não está configurado.')
-  const normalizedName = name.trim()
+  const normalizedName = details.name.trim()
   if (!normalizedName) throw new Error('Informe o nome da empresa.')
   const companyRef = doc(collection(db, 'companies'))
-  const company = { id: companyRef.id, name: normalizedName, createdAt: Date.now() }
-  await setDoc(companyRef, { name: company.name, createdAt: company.createdAt })
+  const company: Company = {
+    ...details,
+    id: companyRef.id,
+    name: normalizedName,
+    cnpj: details.cnpj?.trim() || '',
+    legalRepresentative: details.legalRepresentative?.trim() || '',
+    phone: details.phone?.trim() || '',
+    email: details.email?.trim() || '',
+    observations: details.observations?.trim() || '',
+    createdAt: Date.now(),
+  }
+  const { id: _id, ...companyData } = company
+  await setDoc(companyRef, companyData)
   return company
+}
+
+export function subscribeToCompanyContracts(
+  company: string,
+  onData: (contracts: CompanyContract[]) => void,
+  onError: (error: Error) => void,
+) {
+  if (!db) return () => undefined
+  return onSnapshot(collection(db, 'companies', company, 'contracts'), (snapshot) => {
+    onData(snapshot.docs.map((item) => ({ id: item.id, ...item.data() }) as CompanyContract)
+      .sort((left, right) => right.createdAt - left.createdAt))
+  }, onError)
+}
+
+export async function uploadCompanyContract(company: string, file: File): Promise<CompanyContract> {
+  if (!db) throw new Error('Firebase não está configurado.')
+  if (!storage) throw new Error('Configure o bucket do Firebase Storage para importar contratos.')
+  if (file.type !== 'application/pdf' && !file.name.toLocaleLowerCase().endsWith('.pdf')) {
+    throw new Error('Selecione somente arquivos PDF.')
+  }
+  if (file.size > 15 * 1024 * 1024) {
+    throw new Error('Cada contrato deve ter no máximo 15 MB.')
+  }
+
+  const contractRef = doc(collection(db, 'companies', company, 'contracts'))
+  const storagePath = `companies/${company}/contracts/${contractRef.id}.pdf`
+  const storageRef = ref(storage, storagePath)
+  await uploadBytes(storageRef, file, { contentType: 'application/pdf' })
+  try {
+    const contract: CompanyContract = {
+      id: contractRef.id,
+      name: file.name,
+      size: file.size,
+      storagePath,
+      createdAt: Date.now(),
+    }
+    const { id: _id, ...contractData } = contract
+    await setDoc(contractRef, contractData)
+    return contract
+  } catch (error) {
+    await deleteObject(storageRef)
+    throw error
+  }
+}
+
+export async function downloadCompanyContract(contract: CompanyContract): Promise<Blob> {
+  if (!storage) throw new Error('Configure o bucket do Firebase Storage para consultar contratos.')
+  const bytes = await getBytes(ref(storage, contract.storagePath))
+  return new Blob([bytes], { type: 'application/pdf' })
+}
+
+export async function deleteCompanyContract(company: string, contract: CompanyContract) {
+  if (!db) throw new Error('Firebase não está configurado.')
+  if (!storage) throw new Error('Configure o bucket do Firebase Storage para remover contratos.')
+  try {
+    await deleteObject(ref(storage, contract.storagePath))
+  } catch (error) {
+    if (!(error instanceof Error) || !('code' in error) || error.code !== 'storage/object-not-found') throw error
+  }
+  await deleteDoc(doc(db, 'companies', company, 'contracts', contract.id))
 }
 
 export async function deleteCompanyIfUnused(company: string) {
   if (!db) throw new Error('Firebase não está configurado.')
-  const [users, rooms, reservations, monthlyUsage, userMonthlyUsage, packages] = await Promise.all([
+  const [users, rooms, reservations, monthlyUsage, userMonthlyUsage, packages, contracts] = await Promise.all([
     getDocs(query(collection(db, 'users'), where('companyId', '==', company))),
     getDocs(query(collection(db, 'rooms'), where('companyId', '==', company))),
     getDocs(query(collection(db, 'reservations'), where('companyId', '==', company))),
     getDocs(collection(db, 'companies', company, 'monthlyUsage')),
     getDocs(collection(db, 'companies', company, 'userMonthlyUsage')),
     getDocs(collection(db, 'companies', company, 'packages')),
+    getDocs(collection(db, 'companies', company, 'contracts')),
   ])
   const references = [
     [users.size, 'usuários'],
     [rooms.size, 'salas'],
     [reservations.size, 'reservas'],
     [monthlyUsage.size + userMonthlyUsage.size, 'registros de uso'],
+    [contracts.size, 'contratos'],
   ] as const
   const linked = references.filter(([count]) => count > 0).map(([count, label]) => `${count} ${label}`)
   if (linked.length) {

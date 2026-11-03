@@ -14,12 +14,12 @@ Sem credenciais Firebase, o app abre em **modo demonstração**. As reservas de 
 ## Conectar ao Firebase
 
 1. Crie um projeto Firebase e habilite **Authentication → E-mail/senha**.
-2. Crie o Firestore Database.
-3. Copie `.env.example` para `.env.local` e preencha as credenciais da aplicação Web Firebase. Defina também `VITE_COMPANY_ID` com o ID da empresa principal (novos cadastros começam associados a ela; qualquer administrador aprovado pode alocá-los a outra empresa) e, opcionalmente, `VITE_WHATSAPP_NUMBER` com o número internacional, apenas dígitos.
-4. Publique as regras em `firestore.rules` no Firebase Console ou com Firebase CLI:
+2. Crie o Firestore Database e habilite o **Firebase Storage**.
+3. Copie `.env.example` para `.env.local` e preencha as credenciais da aplicação Web Firebase. Defina `VITE_FIREBASE_STORAGE_BUCKET` com o nome do bucket exibido nas configurações do Storage para habilitar contratos em PDF. Defina também `VITE_COMPANY_ID` com o ID da empresa principal (novos cadastros começam associados a ela; qualquer administrador aprovado pode alocá-los a outra empresa) e, opcionalmente, `VITE_WHATSAPP_NUMBER` com o número internacional, apenas dígitos.
+4. Publique as regras de Firestore e Storage (`firestore.rules` e `storage.rules`) no Firebase Console ou com Firebase CLI:
 
    ```bash
-   firebase deploy --only firestore:rules --project reservas-ninna
+   firebase deploy --only firestore:rules,storage --project reservas-ninna
    ```
 
 5. Crie a primeira conta pelo formulário da aplicação. No Firebase Console, localize `users/{uid}` e altere `role` para `admin` e `status` para `approved`. Essa promoção inicial é manual; qualquer administrador aprovado pode acessar as abas **Empresas** e **Usuários**, protegidas também pelas regras do Firestore.
@@ -48,7 +48,8 @@ As variáveis `VITE_*` são incluídas no bundle do navegador. As credenciais do
 ## Coleções do Firestore
 
 - `users/{uid}` — perfil, papel, empresa e estado de acesso (`pending`, `approved` ou `rejected`). Campos legados de pacote individual, se existirem, não são mais utilizados.
-- `companies/{companyId}` — nome e data de cadastro da empresa. Os documentos raiz podem ser criados apenas por administradores aprovados.
+- `companies/{companyId}` — dados cadastrais e data de cadastro da empresa. Os documentos raiz podem ser criados apenas por administradores aprovados.
+- `companies/{companyId}/contracts/{contractId}` — metadados dos contratos em PDF, com arquivos privados no Firebase Storage. O envio é limitado a PDFs de até 15 MB e somente administradores aprovados podem consultar, importar ou remover contratos.
 - `rooms/{roomId}` — sala, capacidade, horários e empresa.
 - `reservations/{reservationId}` — usuário, empresa proprietária da sala, data, sala, blocos, duração e estado; a agenda é compartilhada entre usuários aprovados.
 - `roomSlots/{roomId_date_horário}` — bloqueio de um intervalo de 30 minutos.

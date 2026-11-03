@@ -1,0 +1,21 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    function isGlobalAdmin() {
+      let userPath = /databases/(default)/documents/users/$(request.auth.uid);
+      return request.auth != null
+        && firestore.exists(userPath)
+        && firestore.get(userPath).data.role == 'admin'
+        && (!('status' in firestore.get(userPath).data)
+          || firestore.get(userPath).data.status == 'approved');
+    }
+
+    match /companies/{company}/contracts/{contractId} {
+      allow read, delete: if isGlobalAdmin();
+      allow create, update: if isGlobalAdmin()
+        && request.resource.size > 0
+        && request.resource.size <= 15 * 1024 * 1024
+        && request.resource.contentType == 'application/pdf';
+    }
+  }
+}
