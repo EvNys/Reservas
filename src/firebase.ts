@@ -8,7 +8,9 @@ import {
 } from 'firebase/auth'
 import {
   collection,
+  deleteDoc,
   doc,
+  getDocs,
   getDoc,
   getFirestore,
   onSnapshot,
@@ -56,14 +58,13 @@ export type Profile = {
   role: 'user' | 'admin'
   companyId: string
   status?: 'pending' | 'approved' | 'rejected'
-  packageLabel?: string
-  monthlyHours?: number
 }
 
 export type Company = {
   id: string
   name: string
   createdAt: number
+  packageInfo?: PackageInfo
 }
 
 export type AccessRequest = Profile & { status: 'pending' }
@@ -192,9 +193,49 @@ export function subscribeToCompanies(
   onError: (error: Error) => void,
 ) {
   if (!db) return () => undefined
-  return onSnapshot(collection(db, 'companies'), (snapshot) => {
-    onData(snapshot.docs.map((item) => ({ id: item.id, ...item.data() }) as Company))
+  const packageSubscriptions = new Map<string, () => void>()
+  const companyData = new Map<string, Company>()
+  const emit = () => onData([...companyData.values()])
+  const unsubscribeCompanies = onSnapshot(collection(db, 'companies'), (snapshot) => {
+    const companyIds = new Set(snapshot.docs.map((item) => item.id))
+    for (const [id, unsubscribe] of packageSubscriptions) {
+      if (companyIds.has(id)) continue
+      unsubscribe()
+      packageSubscriptions.delete(id)
+      companyData.delete(id)
+    }
+    snapshot.docs.forEach((item) => {
+      const current = {
+        ...item.data(),
+        id: item.id,
+        packageInfo: companyData.get(item.id)?.packageInfo,
+      } as Company
+      companyData.set(item.id, current)
+      if (packageSubscriptions.has(item.id)) return
+      packageSubscriptions.set(item.id, onSnapshot(
+        doc(db, 'companies', item.id, 'packages', 'active'),
+        (packageSnapshot) => {
+          const currentCompany = companyData.get(item.id)
+          if (!currentCompany) return
+          const packageData = packageSnapshot.data()
+          companyData.set(item.id, {
+            ...currentCompany,
+            packageInfo: packageData
+              ? { label: packageData.label || 'Plano mensal', monthlyHours: packageData.monthlyHours }
+              : { label: 'Plano mensal', monthlyHours: 50 },
+          })
+          emit()
+        },
+        onError,
+      ))
+    })
+    emit()
   }, onError)
+  return () => {
+    unsubscribeCompanies()
+    packageSubscriptions.forEach((unsubscribe) => unsubscribe())
+    packageSubscriptions.clear()
+  }
 }
 
 export async function ensureCompany(id: string, name: string) {
@@ -216,6 +257,30 @@ export async function createCompany(name: string): Promise<Company> {
   return company
 }
 
+export async function deleteCompanyIfUnused(company: string) {
+  if (!db) throw new Error('Firebase não está configurado.')
+  const [users, rooms, reservations, monthlyUsage, userMonthlyUsage, packages] = await Promise.all([
+    getDocs(query(collection(db, 'users'), where('companyId', '==', company))),
+    getDocs(query(collection(db, 'rooms'), where('companyId', '==', company))),
+    getDocs(query(collection(db, 'reservations'), where('companyId', '==', company))),
+    getDocs(collection(db, 'companies', company, 'monthlyUsage')),
+    getDocs(collection(db, 'companies', company, 'userMonthlyUsage')),
+    getDocs(collection(db, 'companies', company, 'packages')),
+  ])
+  const references = [
+    [users.size, 'usuários'],
+    [rooms.size, 'salas'],
+    [reservations.size, 'reservas'],
+    [monthlyUsage.size + userMonthlyUsage.size, 'registros de uso'],
+  ] as const
+  const linked = references.filter(([count]) => count > 0).map(([count, label]) => `${count} ${label}`)
+  if (linked.length) {
+    throw new Error(`Não é possível excluir esta empresa: ela possui ${linked.join(', ')} vinculados.`)
+  }
+  await Promise.all(packages.docs.map((packageDocument) => deleteDoc(packageDocument.ref)))
+  await deleteDoc(doc(db, 'companies', company))
+}
+
 export async function updateAccountCompany(uid: string, company: string) {
   if (!db) throw new Error('Firebase não está configurado.')
   if (!company.trim()) throw new Error('Selecione uma empresa válida.')
@@ -226,29 +291,11 @@ export async function updateAccountAccess(
   uid: string,
   status: 'approved' | 'rejected',
   role: Profile['role'],
-  packageInfo?: PackageInfo,
 ) {
   if (!db) throw new Error('Firebase não está configurado.')
-  if (status === 'approved' && (!packageInfo?.label.trim() || !Number.isFinite(packageInfo.monthlyHours) || packageInfo.monthlyHours < 0)) {
-    throw new Error('Informe um pacote válido antes de aprovar o acesso.')
-  }
   await updateDoc(doc(db, 'users', uid), {
     status,
     role,
-    ...(status === 'approved' && packageInfo
-      ? { packageLabel: packageInfo.label, monthlyHours: packageInfo.monthlyHours }
-      : {}),
-  })
-}
-
-export async function updateAccountPackage(uid: string, packageInfo: PackageInfo) {
-  if (!db) throw new Error('Firebase não está configurado.')
-  if (!packageInfo.label.trim() || !Number.isFinite(packageInfo.monthlyHours) || packageInfo.monthlyHours < 0) {
-    throw new Error('Informe um pacote válido.')
-  }
-  await updateDoc(doc(db, 'users', uid), {
-    packageLabel: packageInfo.label,
-    monthlyHours: packageInfo.monthlyHours,
   })
 }
 
@@ -326,17 +373,15 @@ export async function createReservation(
   const roomRef = doc(db, 'rooms', room.id)
   const usageMonth = monthKey(new Date(`${date}T12:00:00`))
   const userUsageRef = doc(db, 'companies', room.companyId, 'userMonthlyUsage', `${profile.uid}_${usageMonth}`)
-  const profileRef = doc(db, 'users', profile.uid)
   const packageRef = doc(db, 'companies', room.companyId, 'packages', 'active')
   const slotRefs = sortedBlocks.map((time) => doc(db!, 'roomSlots', slotId(room.id, date, time)))
   const hours = sortedBlocks.length * 0.5
 
   await runTransaction(db, async (transaction) => {
     const slotSnapshots = await Promise.all(slotRefs.map((reference) => transaction.get(reference)))
-    const [roomSnapshot, userUsageSnapshot, profileSnapshot, packageSnapshot] = await Promise.all([
+    const [roomSnapshot, userUsageSnapshot, packageSnapshot] = await Promise.all([
       transaction.get(roomRef),
       transaction.get(userUsageRef),
-      transaction.get(profileRef),
       transaction.get(packageRef),
     ])
     const roomData = roomSnapshot.data()
@@ -346,7 +391,7 @@ export async function createReservation(
     if (slotSnapshots.some((snapshot) => snapshot.exists())) {
       throw new Error('Um ou mais horários acabaram de ser reservados. Atualize a agenda.')
     }
-    const monthlyHours = Number(profileSnapshot.data()?.monthlyHours ?? packageSnapshot.data()?.monthlyHours ?? 50)
+    const monthlyHours = Number(packageSnapshot.data()?.monthlyHours ?? 50)
     const hoursUsed = Number(userUsageSnapshot.data()?.hoursUsed ?? 0)
     if (hoursUsed + hours > monthlyHours) {
       throw new Error(`Saldo insuficiente. Restam ${Math.max(0, monthlyHours - hoursUsed).toFixed(1)} horas neste mês.`)
@@ -426,5 +471,9 @@ export async function updateRoom(room: Room) {
 
 export async function savePackage(company: string, packageInfo: PackageInfo) {
   if (!db) throw new Error('Firebase não está configurado.')
-  await setDoc(doc(db, 'companies', company, 'packages', 'active'), packageInfo)
+  const normalizedPackage = { label: packageInfo.label.trim(), monthlyHours: packageInfo.monthlyHours }
+  if (!normalizedPackage.label || !Number.isFinite(normalizedPackage.monthlyHours) || normalizedPackage.monthlyHours < 0) {
+    throw new Error('Informe um nome de pacote e uma quantidade válida de horas mensais.')
+  }
+  await setDoc(doc(db, 'companies', company, 'packages', 'active'), normalizedPackage)
 }

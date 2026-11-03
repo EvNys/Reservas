@@ -23,8 +23,8 @@ Sem credenciais Firebase, o app abre em **modo demonstração**. As reservas de 
    ```
 
 5. Crie a primeira conta pelo formulário da aplicação. No Firebase Console, localize `users/{uid}` e altere `role` para `admin` e `status` para `approved`. Essa promoção inicial é manual; qualquer administrador aprovado pode acessar as abas **Empresas** e **Usuários**, protegidas também pelas regras do Firestore.
-6. Entre novamente na aplicação. Em **Empresas**, cadastre as empresas; em **Usuários**, consulte todas as contas e aloque cada uma a uma empresa cadastrada. A alocação preserva o papel e o estado de acesso do usuário. Administradores de cada empresa continuam usando **Gestão** para analisar solicitações, administrar usuários, salas e pacotes daquela empresa.
-7. Cadastre as salas e configure o pacote padrão em **Gestão**. Os dados e reservas carregados no espaço de trabalho seguem a empresa associada ao perfil do usuário.
+6. Entre novamente na aplicação. Em **Empresas**, cadastre as empresas e configure o pacote mensal de cada uma; em **Usuários**, consulte todas as contas e aloque cada uma a uma empresa cadastrada. A alocação preserva o papel e o estado de acesso do usuário. Só é possível excluir uma empresa sem usuários, salas, reservas ou registros de uso vinculados.
+7. Cadastre as salas em **Gestão**. O limite de horas do pacote da empresa se aplica a todos os usuários associados a ela; a aprovação de usuários não define pacotes individuais.
 8. Reinicie o Vite após alterar variáveis de ambiente:
 
    ```bash
@@ -38,25 +38,25 @@ As variáveis `VITE_*` são incluídas no bundle do navegador. As credenciais do
 - A disponibilidade é organizada em blocos de 30 minutos e compartilhada entre usuários aprovados da mesma empresa. Use **Adicionar intervalo contínuo** para reservar entre um horário inicial e final (o final não é incluído, então 14:00–15:00 bloqueia 14:00 e 14:30), ou selecione blocos individuais para combinar períodos separados da mesma sala e data.
 - O cliente confirma a reserva em uma transação Firestore: cria a reserva na empresa proprietária da sala, bloqueia os documentos determinísticos em `roomSlots` e atualiza o consumo mensal individual do usuário. O consumo agregado do hub é calculado a partir das reservas confirmadas.
 - Reservas concorrentes para o mesmo horário são recusadas pela transação se o bloco já tiver sido ocupado.
-- O limite é aplicado por usuário. Contas sem pacote individual usam o pacote padrão da empresa; se não houver um limite numérico válido, o limite é de 50 horas. Administradores aprovados inicializam automaticamente o saldo mensal individual de contas existentes ao sincronizar a Gestão.
+- O limite mensal do pacote é definido por empresa e aplicado a cada usuário dessa empresa; se não houver pacote configurado, o limite padrão é de 50 horas. Administradores aprovados inicializam automaticamente o saldo mensal individual de contas existentes ao sincronizar a Gestão.
 - Cancelar uma reserva futura libera os blocos e devolve as horas ao mês em que a reserva foi feita.
-- Novos cadastros ficam com estado pendente e não podem acessar as funcionalidades da plataforma até a aprovação. Administradores recebem um aviso dentro do app e podem aprovar escolhendo o papel e o pacote individual, ou recusar o acesso.
+- Novos cadastros ficam com estado pendente e não podem acessar as funcionalidades da plataforma até a aprovação. Administradores recebem um aviso dentro do app e podem aprovar escolhendo o papel ou recusar o acesso.
 - O acesso às abas de empresas e usuários exige apenas `role: "admin"` e perfil aprovado. Qualquer administrador aprovado pode criar empresas e alterar a empresa associada a um perfil.
 - Pagamentos e renovações acontecem fora do app. Quando o saldo não cobre a solicitação, a aplicação mostra o contato pelo WhatsApp; o destino deve ser configurado em `VITE_WHATSAPP_NUMBER`.
 - O papel do administrador é controlado pelo documento de perfil no Firestore. As regras deixam usuários comuns criarem o próprio perfil apenas com o papel `user`.
 
 ## Coleções do Firestore
 
-- `users/{uid}` — perfil, papel, empresa, estado de acesso (`pending`, `approved` ou `rejected`) e pacote individual opcional (`packageLabel`, `monthlyHours`).
+- `users/{uid}` — perfil, papel, empresa e estado de acesso (`pending`, `approved` ou `rejected`). Campos legados de pacote individual, se existirem, não são mais utilizados.
 - `companies/{companyId}` — nome e data de cadastro da empresa. Os documentos raiz podem ser criados apenas por administradores aprovados.
 - `rooms/{roomId}` — sala, capacidade, horários e empresa.
 - `reservations/{reservationId}` — usuário, empresa proprietária da sala, data, sala, blocos, duração e estado; a agenda é compartilhada entre usuários aprovados.
 - `roomSlots/{roomId_date_horário}` — bloqueio de um intervalo de 30 minutos.
-- `companies/{companyId}/packages/active` — pacote padrão (nome e limite mensal de horas) para contas sem pacote individual.
+- `companies/{companyId}/packages/active` — pacote da empresa (nome e limite mensal de horas), aplicado a todos os usuários associados a ela. Sem documento de pacote, o limite é de 50 horas por mês.
 - `companies/{companyId}/monthlyUsage/{AAAA-MM}` — consumo agregado legado; o painel atual calcula o agregado diretamente das reservas.
-- `companies/{companyId}/userMonthlyUsage/{uid_AAAA-MM}` — consumo mensal utilizado por cada usuário, vinculado às reservas e validado contra o pacote individual.
+- `companies/{companyId}/userMonthlyUsage/{uid_AAAA-MM}` — consumo mensal utilizado por cada usuário, vinculado às reservas e validado contra o pacote da empresa.
 
-As regras impedem perfis pendentes ou recusados de acessar salas e reservas, permitem que usuários aprovados compartilhem a agenda da própria empresa e reservem apenas em salas ativas dessa empresa, e vinculam os bloqueios e o consumo às reservas da transação. Usuários comuns só podem cancelar as próprias reservas; administradores da empresa podem gerenciar salas, pacotes e cancelar reservas de terceiros. A conta de autenticação é criada ao enviar o pedido, mas o acesso ao app só é liberado após aprovação. Como a aplicação não possui código confiável no servidor, mantenha as regras publicadas e revise-as antes de ampliar os fluxos ou permitir operações privilegiadas adicionais.
+As regras impedem perfis pendentes ou recusados de acessar salas e reservas, permitem que usuários aprovados compartilhem a agenda da própria empresa e reservem apenas em salas ativas dessa empresa, e vinculam os bloqueios e o consumo às reservas da transação. Usuários comuns só podem cancelar as próprias reservas; administradores da empresa podem gerenciar salas e cancelar reservas de terceiros. Administradores aprovados podem gerenciar pacotes de empresas. A conta de autenticação é criada ao enviar o pedido, mas o acesso ao app só é liberado após aprovação. Como a aplicação não possui código confiável no servidor, mantenha as regras publicadas e revise-as antes de ampliar os fluxos ou permitir operações privilegiadas adicionais.
 
 ## Verificação
 

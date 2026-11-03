@@ -40,25 +40,22 @@ service cloud.firestore {
       return /databases/$(database)/documents/companies/$(company)/userMonthlyUsage/$(userId + '_' + month);
     }
 
-    function userPackageLimit(company, userId) {
-      let userProfile = get(/databases/$(database)/documents/users/$(userId)).data;
+    function userPackageLimit(company) {
       let packagePath = /databases/$(database)/documents/companies/$(company)/packages/active;
       let packageLimit = exists(packagePath) ? get(packagePath).data.monthlyHours : null;
-      return ('monthlyHours' in userProfile && userProfile.monthlyHours is number)
-        ? userProfile.monthlyHours
-        : (packageLimit is number ? packageLimit : 50);
+      return packageLimit is number ? packageLimit : 50;
     }
 
-    function userUsageWithinPackage(company, booking) {
+        function userUsageWithinPackage(company, booking) {
       let usagePath = userUsagePath(
         company,
         booking.userId,
-        booking.date.substr(0, 7)
+        booking.date[0:7]
       );
       let hoursUsed = exists(usagePath) ? get(usagePath).data.hoursUsed : 0;
       return hoursUsed is number
         && hoursUsed >= 0
-        && hoursUsed + booking.hours <= userPackageLimit(company, booking.userId);
+        && hoursUsed + booking.hours <= userPackageLimit(company);
     }
 
     function validReservation(company) {
@@ -92,9 +89,9 @@ service cloud.firestore {
         && userUsageWithinPackage(company, request.resource.data);
     }
 
-    function usageMatchesBookingMonth(company, booking) {
+        function usageMatchesBookingMonth(company, booking) {
       return request.resource.data.companyId == company
-        && request.resource.data.month == booking.date.substr(0, 7)
+        && request.resource.data.month == booking.date[0:7]
         && request.resource.data.hoursUsed >= 0;
     }
 
@@ -152,12 +149,12 @@ service cloud.firestore {
         );
     }
 
-    function userUsageMatchesBooking(company, booking) {
+        function userUsageMatchesBooking(company, booking) {
       return request.resource.data.companyId == company
         && request.resource.data.userId is string
         && request.resource.data.userId == booking.userId
         && request.resource.data.month is string
-        && request.resource.data.month == booking.date.substr(0, 7)
+        && request.resource.data.month == booking.date[0:7]
         && request.resource.data.hoursUsed is number
         && request.resource.data.hoursUsed >= 0;
     }
@@ -173,7 +170,7 @@ service cloud.firestore {
         && afterBooking.status == 'confirmed'
         && userUsageMatchesBooking(company, afterBooking)
         && request.resource.data.hoursUsed == afterBooking.hours
-        && request.resource.data.hoursUsed <= userPackageLimit(company, afterBooking.userId);
+        && request.resource.data.hoursUsed <= userPackageLimit(company);
     }
 
     function validUserUsageUpdate(company) {
@@ -189,7 +186,7 @@ service cloud.firestore {
             && afterBooking.userId == request.auth.uid
             && afterBooking.status == 'confirmed'
             && request.resource.data.hoursUsed == resource.data.hoursUsed + afterBooking.hours
-            && request.resource.data.hoursUsed <= userPackageLimit(company, afterBooking.userId)
+            && request.resource.data.hoursUsed <= userPackageLimit(company)
           )
           || (
             exists(path)
@@ -221,10 +218,12 @@ service cloud.firestore {
         && request.resource.data.companyId == resource.data.companyId
         && request.resource.data.uid == resource.data.uid
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'email'])
-        && request.resource.data.keys().hasOnly(['uid', 'name', 'email', 'role', 'companyId', 'status', 'packageLabel', 'monthlyHours'])
+        && request.resource.data.keys().hasOnly([
+          'uid', 'name', 'email', 'role', 'companyId', 'status', 'packageLabel', 'monthlyHours'
+        ])
       ) || (
         isAdmin(resource.data.companyId)
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'role', 'packageLabel', 'monthlyHours'])
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'role'])
         && (
           (
             resource.data.status == 'pending'
@@ -235,15 +234,6 @@ service cloud.firestore {
             resource.data.status != 'pending'
             && request.resource.data.status == resource.data.status
             && request.resource.data.role == resource.data.role
-          )
-        )
-        && (
-          request.resource.data.status == 'rejected'
-          || (
-            request.resource.data.packageLabel is string
-            && request.resource.data.packageLabel.size() > 0
-            && request.resource.data.monthlyHours is number
-            && request.resource.data.monthlyHours >= 0
           )
         )
       ) || (
@@ -264,7 +254,8 @@ service cloud.firestore {
         && request.resource.data.name is string
         && request.resource.data.name.size() > 0
         && request.resource.data.createdAt is number;
-      allow update, delete: if false;
+      allow update: if false;
+      allow delete: if isGlobalAdmin();
     }
 
     match /rooms/{roomId} {
@@ -338,11 +329,19 @@ service cloud.firestore {
 
     match /companies/{company}/packages/{packageId} {
       allow read: if profileIsApproved();
-      allow write: if isAdmin(company);
+      allow create, update: if (isGlobalAdmin() || isAdmin(company))
+        && packageId == 'active'
+        && request.resource.data.keys().hasOnly(['label', 'monthlyHours'])
+        && request.resource.data.keys().hasAll(['label', 'monthlyHours'])
+        && request.resource.data.label is string
+        && request.resource.data.label.size() > 0
+        && request.resource.data.monthlyHours is number
+        && request.resource.data.monthlyHours >= 0;
+      allow delete: if isGlobalAdmin() || isAdmin(company);
     }
 
     match /companies/{company}/monthlyUsage/{month} {
-      allow read: if sameCompany(company);
+      allow read: if sameCompany(company) || isGlobalAdmin();
       allow create: if isAdmin(company) || (sameCompany(company) && validUsageCreate(company));
       allow update: if isAdmin(company) || (sameCompany(company) && validUsageUpdate(company));
       allow delete: if isAdmin(company);
@@ -351,7 +350,8 @@ service cloud.firestore {
     match /companies/{company}/userMonthlyUsage/{usageId} {
       allow read: if profileIsApproved()
         && (
-          isAdmin(company)
+          isGlobalAdmin()
+          || isAdmin(company)
           || (
             resource.data.userId == request.auth.uid
             && usageId.matches('^' + request.auth.uid + '_\\d{4}-\\d{2}$')
