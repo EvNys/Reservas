@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { FormEvent, ReactNode } from 'react'
 import {
   AlarmClock,
@@ -6,6 +6,7 @@ import {
   ArrowRight,
   ArrowUpRight,
   Bell,
+  Building2,
   CalendarDays,
   Check,
   CircleHelp,
@@ -24,13 +25,19 @@ import {
   X,
 } from 'lucide-react'
 import { companyId, firebaseEnabled, whatsappNumber } from './firebase-config'
-import type { AccessRequest, PackageInfo, Profile, Reservation, Room, WorkspaceData } from './firebase'
+import type { AccessRequest, Company, PackageInfo, Profile, Reservation, Room, WorkspaceData } from './firebase'
 
-type View = 'reserve' | 'mine' | 'manage'
+type View = 'reserve' | 'mine' | 'manage' | 'companies' | 'users'
 
 const today = localDate(new Date())
 const currentMonth = today.slice(0, 7)
 const currentTime = new Intl.DateTimeFormat('pt-BR', { hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date())
+const emptyWorkspaceData: WorkspaceData = {
+  rooms: [],
+  reservations: [],
+  hoursUsed: 0,
+  packageInfo: { monthlyHours: 50, label: 'Plano mensal' },
+}
 const demoProfile: Profile = {
   uid: 'demo-user',
   name: 'Camila Nogueira',
@@ -155,15 +162,33 @@ function accountPackage(account: Profile, fallback: PackageInfo): PackageInfo {
 }
 
 function App() {
-  const [workspace, setWorkspace] = useState<WorkspaceData>(seedWorkspace)
+  const [workspaceState, setWorkspaceState] = useState(() => ({ companyId, data: seedWorkspace() }))
   const [profile, setProfile] = useState<Profile | null>(firebaseEnabled ? null : demoProfile)
   const [pendingAccounts, setPendingAccounts] = useState<AccessRequest[]>(firebaseEnabled ? [] : demoAccessRequests)
   const [companyAccounts, setCompanyAccounts] = useState<Profile[]>(firebaseEnabled ? [] : [demoProfile, ...demoAccounts])
+  const [allAccounts, setAllAccounts] = useState<Profile[]>(firebaseEnabled ? [] : [demoProfile, ...demoAccounts, ...demoAccessRequests])
+  const [companies, setCompanies] = useState<Company[]>(firebaseEnabled ? [] : [{ id: companyId, name: 'Empresa principal', createdAt: 0 }])
   const [accountRoles, setAccountRoles] = useState<Record<string, Profile['role']>>({})
   const [accountPackageDrafts, setAccountPackageDrafts] = useState<Record<string, PackageInfo>>({})
+  const [accountCompanyDrafts, setAccountCompanyDrafts] = useState<Record<string, string>>({})
   const [accountSearch, setAccountSearch] = useState('')
+  const [platformAccountSearch, setPlatformAccountSearch] = useState('')
+  const [companyBusy, setCompanyBusy] = useState(false)
+  const [savingCompanyAccounts, setSavingCompanyAccounts] = useState<Record<string, boolean>>({})
   const [companyAccountsSnapshot, setCompanyAccountsSnapshot] = useState<string | null>(firebaseEnabled ? null : companyId)
-  const isHubAdmin = profile?.role === 'admin' && profile.companyId === companyId
+  const isHubAdmin = profile?.role === 'admin'
+  const isAdmin = profile?.role === 'admin'
+  const activeCompanyId = profile?.companyId || companyId
+  const workspace = workspaceState.companyId === activeCompanyId ? workspaceState.data : emptyWorkspaceData
+  const setWorkspace = useCallback((update: WorkspaceData | ((current: WorkspaceData) => WorkspaceData)) => {
+    setWorkspaceState((current) => {
+      const currentData = current.companyId === activeCompanyId ? current.data : emptyWorkspaceData
+      return {
+        companyId: activeCompanyId,
+        data: typeof update === 'function' ? update(currentData) : update,
+      }
+    })
+  }, [activeCompanyId])
   const [view, setView] = useState<View>('reserve')
   const [date, setDate] = useState(today)
   const [selectedRoom, setSelectedRoom] = useState('')
@@ -219,7 +244,7 @@ function App() {
   }, [])
 
   useEffect(() => {
-    if (!firebaseEnabled || profile?.role !== 'admin' || profile.companyId !== companyId || profile.status === 'pending' || profile.status === 'rejected') return
+    if (!firebaseEnabled || profile?.role !== 'admin' || profile.status === 'pending' || profile.status === 'rejected') return
     let unsubscribe: () => void = () => {}
     let cancelled = false
     void import('./firebase').then(({ subscribeToPendingAccounts }) => {
@@ -238,7 +263,7 @@ function App() {
   }, [profile])
 
   useEffect(() => {
-    if (!firebaseEnabled || profile?.role !== 'admin' || profile.companyId !== companyId || profile.status === 'pending' || profile.status === 'rejected') return
+    if (!firebaseEnabled || profile?.role !== 'admin' || profile.status === 'pending' || profile.status === 'rejected') return
     let unsubscribe: () => void = () => {}
     let cancelled = false
     void import('./firebase').then(({ subscribeToCompanyAccounts }) => {
@@ -259,49 +284,76 @@ function App() {
   }, [profile])
 
   useEffect(() => {
+    if (!firebaseEnabled || !isAdmin) return
+    let unsubscribeAccounts: () => void = () => {}
+    let unsubscribeCompanies: () => void = () => {}
+    let cancelled = false
+    void import('./firebase').then(({ ensureCompany, subscribeToAllAccounts, subscribeToCompanies }) => {
+      if (cancelled) return
+      unsubscribeAccounts = subscribeToAllAccounts((accounts) => {
+        setAllAccounts(accounts)
+        setAccountCompanyDrafts((drafts) => Object.fromEntries(accounts.map((account) => [
+          account.uid,
+          drafts[account.uid] || account.companyId,
+        ])))
+      }, (error) => setToast(`Erro ao carregar usuários: ${error.message}`))
+      unsubscribeCompanies = subscribeToCompanies(
+        setCompanies,
+        (error) => setToast(`Erro ao carregar empresas: ${error.message}`),
+      )
+      void ensureCompany(companyId, 'Empresa principal')
+        .catch((error: unknown) => setToast(`Erro ao preparar a empresa principal: ${errorMessage(error)}`))
+    }).catch((error: unknown) => setToast(`Erro ao abrir a administração: ${errorMessage(error)}`))
+    return () => {
+      cancelled = true
+      unsubscribeAccounts()
+      unsubscribeCompanies()
+    }
+  }, [isAdmin])
+
+  useEffect(() => {
     if (!firebaseEnabled || !profile) return
     let unsubscribe: () => void = () => {}
     let cancelled = false
     void import('./firebase').then(({ subscribeToWorkspace }) => {
       if (cancelled) return
       unsubscribe = subscribeToWorkspace(
-        companyId,
+        activeCompanyId,
         (incoming) => setWorkspace((old) => ({ ...old, ...incoming })),
         (error) => setToast(`Erro ao sincronizar: ${error.message}`),
-        () => setReservationsSnapshot(`${companyId}_${selectedMonth}`),
+        () => setReservationsSnapshot(`${activeCompanyId}_${selectedMonth}`),
       )
     }).catch((error: unknown) => setToast(`Erro ao conectar ao Firebase: ${errorMessage(error)}`))
     return () => {
       cancelled = true
       unsubscribe()
     }
-  }, [profile, selectedMonth])
+  }, [profile, activeCompanyId, selectedMonth, setWorkspace])
 
   useEffect(() => {
     if (!firebaseEnabled
       || profile?.role !== 'admin'
-      || profile.companyId !== companyId
       || companyAccountsSnapshot !== profile.companyId
-      || reservationsSnapshot !== `${companyId}_${selectedMonth}`) return
+      || reservationsSnapshot !== `${activeCompanyId}_${selectedMonth}`) return
     const monthReservations = workspace.reservations.filter(
       (booking) => booking.date.slice(0, 7) === selectedMonth && booking.status === 'confirmed',
     )
     void import('./firebase').then(({ initializeUserMonthlyUsage }) => {
       companyAccounts.forEach((account) => {
-        const key = `${companyId}_${account.uid}_${selectedMonth}`
+        const key = `${activeCompanyId}_${account.uid}_${selectedMonth}`
         if (initializedUsage.current.has(key)) return
         initializedUsage.current.add(key)
         const hoursUsed = monthReservations
           .filter((booking) => booking.userId === account.uid)
           .reduce((total, booking) => total + booking.hours, 0)
-        void initializeUserMonthlyUsage(companyId, account.uid, selectedMonth, hoursUsed)
+        void initializeUserMonthlyUsage(activeCompanyId, account.uid, selectedMonth, hoursUsed)
           .catch((error: unknown) => {
             initializedUsage.current.delete(key)
             setToast(`Erro ao sincronizar o saldo de ${account.name}: ${errorMessage(error)}`)
           })
       })
     }).catch((error: unknown) => setToast(`Erro ao inicializar saldo dos usuários: ${errorMessage(error)}`))
-  }, [profile, companyAccounts, companyAccountsSnapshot, reservationsSnapshot, workspace.reservations, selectedMonth])
+  }, [profile, activeCompanyId, companyAccounts, companyAccountsSnapshot, reservationsSnapshot, workspace.reservations, selectedMonth])
 
   const allRooms = workspace.rooms
   const rooms = allRooms.filter((room) => room.active)
@@ -327,6 +379,9 @@ function App() {
     .sort((left, right) => left.date.localeCompare(right.date))
   const filteredAccounts = companyAccounts
     .filter((account) => `${account.name} ${account.email}`.toLocaleLowerCase('pt-BR').includes(accountSearch.trim().toLocaleLowerCase('pt-BR')))
+    .sort((left, right) => left.name.localeCompare(right.name, 'pt-BR'))
+  const filteredPlatformAccounts = allAccounts
+    .filter((account) => `${account.name} ${account.email}`.toLocaleLowerCase('pt-BR').includes(platformAccountSearch.trim().toLocaleLowerCase('pt-BR')))
     .sort((left, right) => left.name.localeCompare(right.name, 'pt-BR'))
   const monthDate = new Date(`${date}T12:00:00`)
   const dayCount = new Date(monthDate.getFullYear(), monthDate.getMonth() + 1, 0).getDate()
@@ -528,6 +583,67 @@ function App() {
     }
   }
 
+  async function handleCreateCompany(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    const formElement = event.currentTarget
+    const form = new FormData(formElement)
+    const name = String(form.get('name')).trim()
+    if (!name) {
+      setToast('Informe o nome da empresa.')
+      return
+    }
+    setCompanyBusy(true)
+    try {
+      if (firebaseEnabled) {
+        const { createCompany } = await import('./firebase')
+        const company = await createCompany(name)
+        setCompanies((current) => [...current, company])
+      } else {
+        setCompanies((current) => [...current, {
+          id: `empresa-${Date.now()}`,
+          name,
+          createdAt: Date.now(),
+        }])
+      }
+      formElement.reset()
+      setToast(`Empresa ${name} cadastrada com sucesso.`)
+    } catch (error) {
+      setToast(`Não foi possível cadastrar a empresa: ${errorMessage(error)}`)
+    } finally {
+      setCompanyBusy(false)
+    }
+  }
+
+  async function handleSaveAccountCompany(account: Profile) {
+    const nextCompanyId = accountCompanyDrafts[account.uid]
+    if (!nextCompanyId || !companies.some((company) => company.id === nextCompanyId)) {
+      setToast('Selecione uma empresa cadastrada.')
+      return
+    }
+    setSavingCompanyAccounts((current) => ({ ...current, [account.uid]: true }))
+    try {
+      if (firebaseEnabled) {
+        const { updateAccountCompany } = await import('./firebase')
+        await updateAccountCompany(account.uid, nextCompanyId)
+      }
+      setAllAccounts((accounts) => accounts.map((item) => item.uid === account.uid
+        ? { ...item, companyId: nextCompanyId }
+        : item))
+      setCompanyAccounts((accounts) => accounts.map((item) => item.uid === account.uid
+        ? { ...item, companyId: nextCompanyId }
+        : item))
+      setPendingAccounts((accounts) => accounts.map((item) => item.uid === account.uid
+        ? { ...item, companyId: nextCompanyId }
+        : item))
+      const companyName = companies.find((company) => company.id === nextCompanyId)?.name
+      setToast(`${account.name} alocado(a) à empresa ${companyName}.`)
+    } catch (error) {
+      setToast(`Não foi possível alocar ${account.name}: ${errorMessage(error)}`)
+    } finally {
+      setSavingCompanyAccounts((current) => ({ ...current, [account.uid]: false }))
+    }
+  }
+
   async function handleAccountDecision(account: AccessRequest, approved: boolean) {
     const role = accountRoles[account.uid] || 'user'
     const packageInfo = accountPackageDrafts[account.uid] || workspace.packageInfo
@@ -609,6 +725,13 @@ function App() {
     .format(new Date(`${date}T12:00:00`))
   const roomColor = room ? room.color : 'blue'
   const whatsappMessage = `Olá! Gostaria de saber sobre a renovação do pacote de horas da empresa. Meu saldo atual é de ${remaining.toFixed(1)} horas.`
+  const viewTitles: Record<View, string> = {
+    reserve: 'Reservar',
+    mine: 'Minhas reservas',
+    manage: 'Gestão',
+    companies: 'Empresas',
+    users: 'Usuários',
+  }
 
   return (
     <div className="min-h-screen bg-[#f7f8fa] text-slate-900">
@@ -623,6 +746,10 @@ function App() {
           <SideLink active={view === 'reserve'} icon={<CalendarDays size={18} />} label="Reservar espaço" onClick={() => { setView('reserve'); setSidebarOpen(false) }} />
           <SideLink active={view === 'mine'} icon={<LayoutDashboard size={18} />} label="Minhas reservas" count={userReservations.length || undefined} onClick={() => { setView('mine'); setSidebarOpen(false) }} />
           {isHubAdmin && <SideLink active={view === 'manage'} icon={<Settings2 size={18} />} label="Gestão" count={pendingAccounts.length || undefined} onClick={() => { setView('manage'); setSidebarOpen(false) }} />}
+          {isAdmin && <>
+            <SideLink active={view === 'companies'} icon={<Building2 size={18} />} label="Empresas" onClick={() => { setView('companies'); setSidebarOpen(false) }} />
+            <SideLink active={view === 'users'} icon={<Users size={18} />} label="Usuários" onClick={() => { setView('users'); setSidebarOpen(false) }} />
+          </>}
         </nav>
 
         <div className="mt-9 mb-3 px-3 text-[10px] font-bold uppercase tracking-[0.17em] text-slate-400">Sua empresa</div>
@@ -652,7 +779,7 @@ function App() {
         <header className="sticky top-0 z-10 flex h-[68px] items-center justify-between border-b border-slate-200/80 bg-white/90 px-5 backdrop-blur md:px-8">
           <div className="flex items-center gap-3">
             <button aria-label="Abrir menu" onClick={() => setSidebarOpen(true)} className="rounded-lg p-2 text-slate-500 hover:bg-slate-100 lg:hidden"><Menu size={19} /></button>
-            <div className="hidden items-center gap-2 text-xs text-slate-400 sm:flex"><span>Espaços</span><span>/</span><span className="font-semibold capitalize text-slate-700">{view === 'reserve' ? 'Reservar' : view === 'mine' ? 'Minhas reservas' : 'Gestão'}</span></div>
+            <div className="hidden items-center gap-2 text-xs text-slate-400 sm:flex"><span>Espaços</span><span>/</span><span className="font-semibold capitalize text-slate-700">{viewTitles[view]}</span></div>
           </div>
           <div className="flex items-center gap-3">
             <span className="hidden text-xs text-slate-500 sm:block">{new Intl.DateTimeFormat('pt-BR', { weekday: 'long', day: 'numeric', month: 'long' }).format(new Date(`${today}T12:00:00`))}</span>
@@ -789,6 +916,69 @@ function App() {
                 <div className="rounded-md bg-emerald-50 px-2 py-1 text-[10px] font-semibold text-emerald-700">Confirmada</div>
                 {booking.date >= today && <button onClick={() => void handleCancel(booking)} className="rounded-md px-2 py-1 text-[10px] font-semibold text-slate-500 hover:bg-rose-50 hover:text-rose-700">Cancelar</button>}
               </div>)}</div> : <div className="p-12 text-center"><CalendarDays className="mx-auto text-slate-300" size={28} /><p className="mt-3 text-sm font-semibold">Nenhuma reserva por enquanto</p><p className="mt-1 text-xs text-slate-500">Escolha uma sala e encontre o horário ideal para você.</p><button onClick={() => setView('reserve')} className="mt-4 rounded-lg bg-blue-600 px-4 py-2 text-xs font-semibold text-white">Encontrar uma sala</button></div>}
+            </div>
+          </section>}
+
+          {view === 'companies' && isAdmin && <section>
+            <PageHeading eyebrow="ADMINISTRAÇÃO GLOBAL" title="Empresas" description="Cadastre as empresas que poderão receber usuários no sistema." />
+            <form onSubmit={(event) => void handleCreateCompany(event)} className="mt-6 flex flex-wrap items-end gap-3 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+              <label className="form-label min-w-[240px] flex-1">Nome da empresa
+                <input name="name" required maxLength={120} className="form-input mt-1.5" placeholder="Ex.: Acme Tecnologia" />
+              </label>
+              <button disabled={companyBusy} className="flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-xs font-semibold text-white hover:bg-blue-700 disabled:bg-slate-400">
+                <Plus size={15} />{companyBusy ? 'Cadastrando…' : 'Cadastrar empresa'}
+              </button>
+            </form>
+            <div className="mt-5 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+              <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4">
+                <div><h2 className="text-sm font-bold">Empresas cadastradas</h2><p className="mt-1 text-xs text-slate-500">Estas empresas estarão disponíveis para alocação de usuários.</p></div>
+                <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[10px] font-semibold">{companies.length}</span>
+              </div>
+              {companies.length ? <div className="divide-y divide-slate-100">{[...companies].sort((left, right) => left.name.localeCompare(right.name, 'pt-BR')).map((company) => {
+                const userCount = allAccounts.filter((account) => account.companyId === company.id).length
+                return <div key={company.id} className="flex flex-wrap items-center gap-3 px-5 py-4">
+                  <span className="rounded-lg bg-blue-50 p-2 text-blue-700"><Building2 size={17} /></span>
+                  <div className="min-w-[180px] flex-1"><div className="text-xs font-semibold">{company.name}</div><div className="mt-1 break-all text-[10px] text-slate-500">ID: {company.id}</div></div>
+                  <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[10px] font-medium text-slate-600">{userCount} {userCount === 1 ? 'usuário' : 'usuários'}</span>
+                </div>
+              })}</div> : <p className="px-5 py-10 text-center text-xs text-slate-500">Nenhuma empresa cadastrada ainda.</p>}
+            </div>
+          </section>}
+
+          {view === 'users' && isAdmin && <section>
+            <PageHeading eyebrow="ADMINISTRAÇÃO GLOBAL" title="Usuários" description="Consulte as contas e defina a empresa à qual cada usuário pertence." />
+            <div className="mt-6 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-5 py-4">
+                <div><h2 className="text-sm font-bold">Contas do sistema</h2><p className="mt-1 text-xs text-slate-500">A alocação mantém o papel e o estado de acesso atuais.</p></div>
+                <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[10px] font-semibold">{allAccounts.length} usuários</span>
+              </div>
+              <label className="relative m-5 mb-0 block max-w-md">
+                <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                <input type="search" value={platformAccountSearch} onChange={(event) => setPlatformAccountSearch(event.target.value)} placeholder="Buscar por nome ou e-mail" aria-label="Buscar usuários por nome ou e-mail" className="form-input pl-9" />
+              </label>
+              {filteredPlatformAccounts.length ? <div className="mt-4 divide-y divide-slate-100">
+                {filteredPlatformAccounts.map((account) => {
+                  const companyIdDraft = accountCompanyDrafts[account.uid] || account.companyId
+                  const assignedCompany = companies.find((company) => company.id === account.companyId)
+                  const statusLabel = account.status === 'pending' ? 'Pendente' : account.status === 'rejected' ? 'Recusado' : 'Ativo'
+                  return <div key={account.uid} className="flex flex-wrap items-center gap-3 px-5 py-4">
+                    <Avatar name={account.name} />
+                    <div className="min-w-[180px] flex-1"><div className="text-xs font-semibold">{account.name}</div><div className="mt-1 text-[10px] text-slate-500">{account.email}</div></div>
+                    <span className={`rounded-full px-2.5 py-1 text-[10px] font-medium ${account.status === 'pending' ? 'bg-amber-50 text-amber-700' : account.status === 'rejected' ? 'bg-rose-50 text-rose-700' : 'bg-emerald-50 text-emerald-700'}`}>{statusLabel}</span>
+                    <label className="form-label min-w-[200px] flex-1 sm:max-w-[300px]">Empresa
+                      <select value={companyIdDraft} onChange={(event) => setAccountCompanyDrafts((drafts) => ({ ...drafts, [account.uid]: event.target.value }))} className="form-input mt-1 py-2">
+                        {!assignedCompany && <option value={account.companyId}>Empresa não cadastrada ({account.companyId})</option>}
+                        {companies.map((company) => <option key={company.id} value={company.id}>{company.name}</option>)}
+                      </select>
+                    </label>
+                    <button
+                      disabled={savingCompanyAccounts[account.uid] || companyIdDraft === account.companyId}
+                      onClick={() => void handleSaveAccountCompany(account)}
+                      className="rounded-lg bg-blue-600 px-3 py-2 text-[10px] font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-slate-300"
+                    >{savingCompanyAccounts[account.uid] ? 'Salvando…' : 'Salvar empresa'}</button>
+                  </div>
+                })}
+              </div> : <p className="px-5 py-10 text-center text-xs text-slate-500">{platformAccountSearch ? 'Nenhum usuário encontrado para essa busca.' : 'Nenhuma conta cadastrada ainda.'}</p>}
             </div>
           </section>}
 

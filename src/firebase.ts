@@ -60,6 +60,12 @@ export type Profile = {
   monthlyHours?: number
 }
 
+export type Company = {
+  id: string
+  name: string
+  createdAt: number
+}
+
 export type AccessRequest = Profile & { status: 'pending' }
 
 export type PackageInfo = {
@@ -169,6 +175,51 @@ export function subscribeToCompanyAccounts(
     ),
     onError,
   )
+}
+
+export function subscribeToAllAccounts(
+  onData: (accounts: Profile[]) => void,
+  onError: (error: Error) => void,
+) {
+  if (!db) return () => undefined
+  return onSnapshot(collection(db, 'users'), (snapshot) => {
+    onData(snapshot.docs.map((item) => ({ ...item.data(), uid: item.id }) as Profile))
+  }, onError)
+}
+
+export function subscribeToCompanies(
+  onData: (companies: Company[]) => void,
+  onError: (error: Error) => void,
+) {
+  if (!db) return () => undefined
+  return onSnapshot(collection(db, 'companies'), (snapshot) => {
+    onData(snapshot.docs.map((item) => ({ id: item.id, ...item.data() }) as Company))
+  }, onError)
+}
+
+export async function ensureCompany(id: string, name: string) {
+  if (!db) throw new Error('Firebase não está configurado.')
+  const companyRef = doc(db, 'companies', id)
+  await runTransaction(db, async (transaction) => {
+    const snapshot = await transaction.get(companyRef)
+    if (!snapshot.exists()) transaction.set(companyRef, { name, createdAt: Date.now() })
+  })
+}
+
+export async function createCompany(name: string): Promise<Company> {
+  if (!db) throw new Error('Firebase não está configurado.')
+  const normalizedName = name.trim()
+  if (!normalizedName) throw new Error('Informe o nome da empresa.')
+  const companyRef = doc(collection(db, 'companies'))
+  const company = { id: companyRef.id, name: normalizedName, createdAt: Date.now() }
+  await setDoc(companyRef, { name: company.name, createdAt: company.createdAt })
+  return company
+}
+
+export async function updateAccountCompany(uid: string, company: string) {
+  if (!db) throw new Error('Firebase não está configurado.')
+  if (!company.trim()) throw new Error('Selecione uma empresa válida.')
+  await updateDoc(doc(db, 'users', uid), { companyId: company })
 }
 
 export async function updateAccountAccess(

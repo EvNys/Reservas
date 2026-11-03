@@ -23,6 +23,11 @@ service cloud.firestore {
       return sameCompany(company) && profile().role == 'admin';
     }
 
+    function isGlobalAdmin() {
+      return profileIsApproved()
+        && profile().role == 'admin';
+    }
+
     function bookingPath(bookingId) {
       return /databases/$(database)/documents/reservations/$(bookingId);
     }
@@ -207,7 +212,7 @@ service cloud.firestore {
         && request.resource.data.status == 'pending'
         && request.resource.data.keys().hasOnly(['uid', 'name', 'email', 'role', 'companyId', 'status']);
       allow read: if signedIn()
-        && (request.auth.uid == userId || isAdmin(resource.data.companyId));
+        && (request.auth.uid == userId || isAdmin(resource.data.companyId) || isGlobalAdmin());
       allow update: if (
         signedIn()
         && request.auth.uid == userId
@@ -241,8 +246,25 @@ service cloud.firestore {
             && request.resource.data.monthlyHours >= 0
           )
         )
+      ) || (
+        isGlobalAdmin()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['companyId'])
+        && request.resource.data.companyId is string
+        && request.resource.data.companyId.size() > 0
+        && exists(/databases/$(database)/documents/companies/$(request.resource.data.companyId))
       );
       allow delete: if isAdmin(resource.data.companyId);
+    }
+
+    match /companies/{company} {
+      allow read: if isGlobalAdmin() || sameCompany(company);
+      allow create: if isGlobalAdmin()
+        && request.resource.data.keys().hasOnly(['name', 'createdAt'])
+        && request.resource.data.keys().hasAll(['name', 'createdAt'])
+        && request.resource.data.name is string
+        && request.resource.data.name.size() > 0
+        && request.resource.data.createdAt is number;
+      allow update, delete: if false;
     }
 
     match /rooms/{roomId} {
