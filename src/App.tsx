@@ -45,13 +45,7 @@ import type {
 
 type View = "reserve" | "mine" | "manage" | "companies" | "users";
 
-const today = localDate(new Date());
-const currentMonth = today.slice(0, 7);
-const currentTime = new Intl.DateTimeFormat("pt-BR", {
-  hour: "2-digit",
-  minute: "2-digit",
-  hour12: false,
-}).format(new Date());
+const initialDate = localDate(new Date());
 const emptyWorkspaceData: WorkspaceData = {
   rooms: [],
   reservations: [],
@@ -165,7 +159,7 @@ function seedWorkspace(): WorkspaceData {
       companyId,
       roomId: "sala-ipe",
       roomName: "Sala Ipê",
-      date: today,
+      date: initialDate,
       blocks: ["10:00", "10:30", "11:00", "11:30"],
       hours: 2,
       status: "confirmed",
@@ -178,7 +172,7 @@ function seedWorkspace(): WorkspaceData {
       companyId,
       roomId: "sala-aurora",
       roomName: "Sala Aurora",
-      date: today,
+      date: initialDate,
       blocks: ["14:00", "14:30"],
       hours: 1,
       status: "confirmed",
@@ -191,7 +185,7 @@ function seedWorkspace(): WorkspaceData {
       companyId,
       roomId: "sala-patio",
       roomName: "Sala Pátio",
-      date: today,
+      date: initialDate,
       blocks: ["13:00", "13:30", "14:00", "14:30", "15:00", "15:30"],
       hours: 3,
       status: "confirmed",
@@ -334,6 +328,20 @@ function makeWhatsAppLink(message: string) {
 }
 
 function App() {
+  const [currentDateTime, setCurrentDateTime] = useState(() => new Date());
+  const today = localDate(currentDateTime);
+  const currentMonth = today.slice(0, 7);
+  const currentTime = new Intl.DateTimeFormat("pt-BR", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(currentDateTime);
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      setCurrentDateTime(new Date());
+    }, 60_000);
+    return () => window.clearInterval(interval);
+  }, []);
   const [workspaceState, setWorkspaceState] = useState(() => ({
     companyId,
     data: seedWorkspace(),
@@ -724,7 +732,10 @@ function App() {
   );
   const userReservations = workspace.reservations
     .filter(
-      (item) => item.userId === profile?.uid && item.status === "confirmed",
+      (item) =>
+        item.userId === profile?.uid &&
+        item.status === "confirmed" &&
+        item.date >= today,
     )
     .sort((left, right) => left.date.localeCompare(right.date));
   const filteredAccounts = companyAccounts
@@ -1981,8 +1992,7 @@ function App() {
                 <MetricCard
                   label="Próximas reservas"
                   value={String(
-                    userReservations.filter((item) => item.date >= today)
-                      .length,
+                    userReservations.length,
                   )}
                   icon={<CalendarDays size={18} />}
                 />
