@@ -55,8 +55,8 @@ const currentTime = new Intl.DateTimeFormat("pt-BR", {
 const emptyWorkspaceData: WorkspaceData = {
   rooms: [],
   reservations: [],
-  hoursUsed: 0,
-  packageInfo: { monthlyHours: 50, label: "Plano mensal" },
+  creditsUsed: 0,
+  packageInfo: { monthlyCredits: 50, label: "Plano mensal" },
 };
 const demoProfile: Profile = {
   uid: "demo-user",
@@ -102,6 +102,7 @@ const demoRooms: Room[] = [
     capacity: 8,
     openTime: "08:00",
     closeTime: "18:00",
+    creditsPerHour: 1,
     color: "blue",
     companyId,
     active: true,
@@ -113,6 +114,7 @@ const demoRooms: Room[] = [
     capacity: 12,
     openTime: "08:00",
     closeTime: "19:00",
+    creditsPerHour: 1,
     color: "violet",
     companyId,
     active: true,
@@ -124,6 +126,7 @@ const demoRooms: Room[] = [
     capacity: 6,
     openTime: "09:00",
     closeTime: "17:00",
+    creditsPerHour: 1,
     color: "amber",
     companyId,
     active: true,
@@ -135,6 +138,7 @@ const demoRooms: Room[] = [
     capacity: 4,
     openTime: "08:00",
     closeTime: "18:00",
+    creditsPerHour: 1,
     color: "emerald",
     companyId,
     active: true,
@@ -196,7 +200,32 @@ function seedWorkspace(): WorkspaceData {
   ];
   try {
     const saved = localStorage.getItem("reservas-demo");
-    if (saved) return JSON.parse(saved) as WorkspaceData;
+    if (saved) {
+      const savedData = JSON.parse(saved) as WorkspaceData & {
+        hoursUsed?: number;
+        packageInfo?: {
+          label?: string;
+          monthlyCredits?: number;
+          monthlyHours?: number;
+        };
+        rooms?: (Room & { creditsPerHour?: number })[];
+      };
+      return {
+        ...savedData,
+        rooms: (savedData.rooms || []).map((room) => ({
+          ...room,
+          creditsPerHour: room.creditsPerHour ?? 1,
+        })),
+        creditsUsed: savedData.creditsUsed ?? savedData.hoursUsed ?? 0,
+        packageInfo: {
+          label: savedData.packageInfo?.label || "Plano mensal",
+          monthlyCredits:
+            savedData.packageInfo?.monthlyCredits ??
+            savedData.packageInfo?.monthlyHours ??
+            50,
+        },
+      };
+    }
   } catch (error) {
     console.error(
       "Não foi possível carregar os dados locais da demonstração.",
@@ -206,9 +235,21 @@ function seedWorkspace(): WorkspaceData {
   return {
     rooms: demoRooms,
     reservations: seedReservations,
-    hoursUsed: 31.5,
-    packageInfo: { monthlyHours: 50, label: "Plano corporativo" },
+    creditsUsed: 31.5,
+    packageInfo: { monthlyCredits: 50, label: "Plano corporativo" },
   };
+}
+
+function reservationCredits(booking: Reservation) {
+  return booking.creditsCost ?? booking.hours;
+}
+
+function roomCreditsPerHour(room: Room) {
+  return room.creditsPerHour ?? 1;
+}
+
+function formatCredits(value: number) {
+  return value.toLocaleString("pt-BR", { maximumFractionDigits: 2 });
 }
 
 function saveDemoWorkspace(data: WorkspaceData) {
@@ -319,7 +360,7 @@ function App() {
             id: companyId,
             name: "Empresa principal",
             createdAt: 0,
-            packageInfo: { label: "Plano corporativo", monthlyHours: 50 },
+            packageInfo: { label: "Plano corporativo", monthlyCredits: 50 },
           },
         ],
   );
@@ -625,14 +666,14 @@ function App() {
           const key = `${activeCompanyId}_${account.uid}_${selectedMonth}`;
           if (initializedUsage.current.has(key)) return;
           initializedUsage.current.add(key);
-          const hoursUsed = monthReservations
+          const creditsUsed = monthReservations
             .filter((booking) => booking.userId === account.uid)
-            .reduce((total, booking) => total + booking.hours, 0);
+            .reduce((total, booking) => total + reservationCredits(booking), 0);
           void initializeUserMonthlyUsage(
             activeCompanyId,
             account.uid,
             selectedMonth,
-            hoursUsed,
+            creditsUsed,
           ).catch((error: unknown) => {
             initializedUsage.current.delete(key);
             setToast(
@@ -667,9 +708,10 @@ function App() {
         booking.date.slice(0, 7) === selectedMonth &&
         booking.status === "confirmed",
     )
-    .reduce((total, booking) => total + booking.hours, 0);
-  const remaining = Math.max(0, userPackage.monthlyHours - currentUsage);
+    .reduce((total, booking) => total + reservationCredits(booking), 0);
+  const remaining = Math.max(0, userPackage.monthlyCredits - currentUsage);
   const bookingHours = selectedBlocks.length * 0.5;
+  const bookingCredits = bookingHours * (room ? roomCreditsPerHour(room) : 0);
   const occupiedBlocks = new Set(
     workspace.reservations
       .filter(
@@ -730,9 +772,9 @@ function App() {
 
   async function handleBooking() {
     if (!profile || !room || !selectedBlocks.length) return;
-    if (bookingHours > remaining) {
+    if (bookingCredits > remaining) {
       setToast(
-        "Seu pacote não tem saldo suficiente. Fale com nosso time para continuar.",
+        "Seu pacote não tem créditos suficientes. Fale com nosso time para continuar.",
       );
       return;
     }
@@ -758,16 +800,17 @@ function App() {
           date,
           blocks: selectedBlocks,
           hours: bookingHours,
+          creditsCost: bookingCredits,
           status: "confirmed",
           createdAt,
         };
         const updated: WorkspaceData = {
           ...workspace,
           reservations: [...workspace.reservations, reservation],
-          hoursUsed:
+          creditsUsed:
             date.slice(0, 7) === currentMonth
-              ? workspace.hoursUsed + bookingHours
-              : workspace.hoursUsed,
+              ? workspace.creditsUsed + bookingCredits
+              : workspace.creditsUsed,
         };
         setWorkspace(updated);
         saveDemoWorkspace(updated);
@@ -837,10 +880,13 @@ function App() {
               ? { ...item, status: "cancelled" as const }
               : item,
           ),
-          hoursUsed:
+          creditsUsed:
             reservation.date.slice(0, 7) === currentMonth
-              ? Math.max(0, workspace.hoursUsed - reservation.hours)
-              : workspace.hoursUsed,
+              ? Math.max(
+                  0,
+                  workspace.creditsUsed - reservationCredits(reservation),
+                )
+              : workspace.creditsUsed,
         };
         setWorkspace(updated);
         saveDemoWorkspace(updated);
@@ -861,10 +907,18 @@ function App() {
       capacity: Number(form.get("capacity")),
       openTime: String(form.get("openTime")),
       closeTime: String(form.get("closeTime")),
+      creditsPerHour: Number(form.get("creditsPerHour")),
       color: "blue",
       companyId: profile?.companyId || companyId,
       active: true,
     };
+    if (
+      !Number.isFinite(newRoom.creditsPerHour) ||
+      newRoom.creditsPerHour < 0
+    ) {
+      setToast("Informe uma tarifa válida de créditos por hora.");
+      return;
+    }
     try {
       if (firebaseEnabled) {
         const { addRoom } = await import("./firebase");
@@ -897,8 +951,16 @@ function App() {
       capacity: Number(form.get("capacity")),
       openTime: String(form.get("openTime")),
       closeTime: String(form.get("closeTime")),
+      creditsPerHour: Number(form.get("creditsPerHour")),
       active: form.get("active") === "on",
     };
+    if (
+      !Number.isFinite(updatedRoom.creditsPerHour) ||
+      updatedRoom.creditsPerHour < 0
+    ) {
+      setToast("Informe uma tarifa válida de créditos por hora.");
+      return;
+    }
     try {
       if (firebaseEnabled) {
         const { updateRoom } = await import("./firebase");
@@ -928,15 +990,15 @@ function App() {
     const form = new FormData(formElement);
     const nextPackage = {
       label: String(form.get("label")).trim(),
-      monthlyHours: Number(form.get("monthlyHours")),
+      monthlyCredits: Number(form.get("monthlyCredits")),
     };
     if (
       !nextPackage.label ||
-      !Number.isFinite(nextPackage.monthlyHours) ||
-      nextPackage.monthlyHours < 0
+      !Number.isFinite(nextPackage.monthlyCredits) ||
+      nextPackage.monthlyCredits < 0
     ) {
       setToast(
-        "Informe um nome de pacote e uma quantidade válida de horas mensais.",
+        "Informe um nome de pacote e uma quantidade válida de créditos mensais.",
       );
       return;
     }
@@ -1247,7 +1309,7 @@ function App() {
     month: "long",
   }).format(new Date(`${date}T12:00:00`));
   const roomColor = room ? room.color : "blue";
-  const whatsappMessage = `Olá! Gostaria de saber sobre a renovação do pacote de horas da empresa. Meu saldo atual é de ${remaining.toFixed(1)} horas.`;
+  const whatsappMessage = `Olá! Gostaria de saber sobre a renovação do pacote de créditos da empresa. Meu saldo atual é de ${formatCredits(remaining)} créditos.`;
   const viewTitles: Record<View, string> = {
     reserve: "Reservar",
     mine: "Minhas reservas",
@@ -1344,23 +1406,23 @@ function App() {
         <div className="rounded-xl border border-slate-100 bg-slate-50 p-3">
           <div className="flex items-center justify-between">
             <span className="text-xs font-semibold text-slate-700">
-              Horas disponíveis
+              Créditos disponíveis
             </span>
             <Sparkles size={14} className="text-blue-500" />
           </div>
           <div className="mt-3 flex items-end gap-1.5">
             <span className="text-[26px] font-bold leading-none tracking-tight">
-              {remaining.toLocaleString("pt-BR", { maximumFractionDigits: 1 })}
+              {formatCredits(remaining)}
             </span>
             <span className="pb-0.5 text-xs text-slate-500">
-              / {userPackage.monthlyHours} h
+              / {formatCredits(userPackage.monthlyCredits)} créditos
             </span>
           </div>
           <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-slate-200">
             <div
               className="h-full rounded-full bg-blue-600 transition-all"
               style={{
-                width: `${Math.min(100, (currentUsage / Math.max(1, userPackage.monthlyHours)) * 100)}%`,
+                width: `${Math.min(100, (currentUsage / Math.max(1, userPackage.monthlyCredits)) * 100)}%`,
               }}
             />
           </div>
@@ -1375,7 +1437,7 @@ function App() {
           rel="noreferrer"
           className="mt-3 flex items-center justify-between rounded-xl bg-blue-50 px-3 py-3 text-xs font-semibold text-blue-700 transition hover:bg-blue-100"
         >
-          Precisa de mais horas? <ArrowUpRight size={15} />
+          Precisa de mais créditos? <ArrowUpRight size={15} />
         </a>
 
         <div className="mt-auto rounded-xl bg-[#f7f8fa] p-3">
@@ -1539,8 +1601,14 @@ function App() {
                               <span className="flex items-center gap-1">
                                 <Users size={11} /> Até {item.capacity} pessoas
                               </span>
-                              <span className="font-semibold text-emerald-700">
-                                {available} horários
+                              <span className="text-right">
+                                <span className="block font-semibold text-blue-700">
+                                  {formatCredits(roomCreditsPerHour(item))}{" "}
+                                  créditos/h
+                                </span>
+                                <span className="text-emerald-700">
+                                  {available} horários
+                                </span>
                               </span>
                             </div>
                           </button>
@@ -1754,9 +1822,9 @@ function App() {
                         })}
                       </div>
                       <p className="mt-3 text-[10px] text-slate-400">
-                        Selecione vários períodos, mesmo que separados, para
-                        reservar a mesma sala. Limite de 10 horas por
-                        solicitação.
+                        A sala custa {formatCredits(roomCreditsPerHour(room))}{" "}
+                        créditos por hora. Selecione vários períodos para
+                        reservar; o limite é de 10 horas por solicitação.
                       </p>
                     </div>
                   )}
@@ -1777,7 +1845,9 @@ function App() {
                           <div>
                             <div className="text-xs font-bold">{room.name}</div>
                             <div className="mt-0.5 text-[10px] text-slate-500">
-                              {room.location}
+                              {room.location} ·{" "}
+                              {formatCredits(roomCreditsPerHour(room))}{" "}
+                              créditos/h
                             </div>
                           </div>
                         </div>
@@ -1791,6 +1861,11 @@ function App() {
                             icon={<AlarmClock size={14} />}
                             label="Duração"
                             value={`${bookingHours.toLocaleString("pt-BR", { maximumFractionDigits: 1 })} h`}
+                          />
+                          <SummaryRow
+                            icon={<Sparkles size={14} />}
+                            label="Custo"
+                            value={`${formatCredits(bookingCredits)} créditos`}
                           />
                         </div>
                         <div className="py-4">
@@ -1832,10 +1907,10 @@ function App() {
                             </div>
                           )}
                         </div>
-                        {bookingHours > remaining && (
+                        {bookingCredits > remaining && (
                           <div className="mb-3 rounded-lg bg-amber-50 p-3 text-[10px] leading-4 text-amber-800">
                             Seu pacote não cobre este período. Restam{" "}
-                            {remaining.toFixed(1)} horas.
+                            {formatCredits(remaining)} créditos.
                           </div>
                         )}
                         <button
@@ -1878,7 +1953,7 @@ function App() {
                       <CircleHelp size={16} />
                     </span>
                     <p className="text-[10px] leading-4 text-blue-800">
-                      Precisa de mais horas? Nossa equipe ajuda com a renovação
+                      Precisa de mais créditos? Nossa equipe ajuda com a renovação
                       do pacote.{" "}
                       <a
                         href={makeWhatsAppLink(whatsappMessage)}
@@ -1912,7 +1987,7 @@ function App() {
                   icon={<CalendarDays size={18} />}
                 />
                 <MetricCard
-                  label="Horas neste mês"
+                  label="Créditos usados neste mês"
                   value={`${workspace.reservations
                     .filter(
                       (item) =>
@@ -1920,13 +1995,13 @@ function App() {
                         item.date.slice(0, 7) === currentMonth &&
                         item.status === "confirmed",
                     )
-                    .reduce((sum, item) => sum + item.hours, 0)
-                    .toLocaleString("pt-BR")} h`}
+                    .reduce((sum, item) => sum + reservationCredits(item), 0)
+                    .toLocaleString("pt-BR")} créditos`}
                   icon={<Clock3 size={18} />}
                 />
                 <MetricCard
                   label="Meu pacote"
-                  value={`${remaining.toLocaleString("pt-BR", { maximumFractionDigits: 1 })} h`}
+                  value={`${formatCredits(remaining)} créditos`}
                   icon={<Sparkles size={18} />}
                 />
               </div>
@@ -2118,7 +2193,7 @@ function App() {
                         ).length;
                         const packageInfo = company.packageInfo || {
                           label: "Plano mensal",
-                          monthlyHours: 50,
+                          monthlyCredits: 50,
                         };
                         return (
                           <div key={company.id} className="space-y-4 px-5 py-5">
@@ -2200,7 +2275,7 @@ function App() {
                                     Contratos em PDF
                                   </h3>
                                   <p className="mt-1 text-[10px] text-slate-500">
-                                    Anexe contratos para consultar as horas
+                                    Anexe contratos para consultar os créditos
                                     previstas. Máximo de 15 MB por arquivo.
                                   </p>
                                 </div>
@@ -2309,7 +2384,7 @@ function App() {
                               )}
                             </div>
                             <form
-                              key={`${company.id}-${packageInfo.label}-${packageInfo.monthlyHours}`}
+                              key={`${company.id}-${packageInfo.label}-${packageInfo.monthlyCredits}`}
                               onSubmit={(event) =>
                                 void handleSaveCompanyPackage(company, event)
                               }
@@ -2326,13 +2401,13 @@ function App() {
                                 />
                               </label>
                               <label className="form-label">
-                                Horas por mês
+                                Créditos por mês
                                 <input
-                                  name="monthlyHours"
+                                  name="monthlyCredits"
                                   type="number"
                                   min="0"
                                   step="0.5"
-                                  defaultValue={packageInfo.monthlyHours}
+                                  defaultValue={packageInfo.monthlyCredits}
                                   required
                                   className="form-input mt-1.5"
                                 />
@@ -2346,8 +2421,8 @@ function App() {
                                   : "Salvar pacote"}
                               </button>
                               <p className="text-[10px] leading-4 text-slate-500 sm:col-span-3">
-                                Este pacote define o limite mensal de todos os
-                                usuários alocados à empresa.
+                                Este pacote define o saldo mensal de créditos
+                                para cada usuário da empresa.
                               </p>
                             </form>
                           </div>
@@ -2615,7 +2690,11 @@ function App() {
                           (booking) =>
                             booking.date.slice(0, 7) === selectedMonth,
                         )
-                        .reduce((total, booking) => total + booking.hours, 0);
+                        .reduce(
+                          (total, booking) =>
+                            total + reservationCredits(booking),
+                          0,
+                        );
                       return (
                         <details
                           key={account.uid}
@@ -2678,16 +2757,16 @@ function App() {
                                   {workspace.packageInfo.label}
                                 </div>
                                 <div className="mt-0.5 text-[10px] text-slate-600">
-                                  {workspace.packageInfo.monthlyHours} horas por
-                                  mês · saldo em {monthLabel(date)}:{" "}
+                                  {formatCredits(
+                                    workspace.packageInfo.monthlyCredits,
+                                  )}{" "}
+                                  créditos por mês · saldo em {monthLabel(date)}:{" "}
                                   {Math.max(
                                     0,
-                                    workspace.packageInfo.monthlyHours -
+                                    workspace.packageInfo.monthlyCredits -
                                       accountUsage,
-                                  ).toLocaleString("pt-BR", {
-                                    maximumFractionDigits: 1,
-                                  })}{" "}
-                                  h
+                                  ).toLocaleString("pt-BR")}{" "}
+                                  créditos
                                 </div>
                               </div>
                             </div>
@@ -2722,7 +2801,9 @@ function App() {
                                               `${range.start}–${range.end}`,
                                           )
                                           .join(", ")}{" "}
-                                        · {booking.hours} h
+                                        · {booking.hours} h ·{" "}
+                                        {formatCredits(reservationCredits(booking))}{" "}
+                                        créditos
                                       </span>
                                       <span
                                         className={`rounded px-1.5 py-0.5 text-[9px] font-semibold ${booking.status === "confirmed" ? "bg-emerald-50 text-emerald-700" : "bg-slate-200 text-slate-600"}`}
@@ -2781,7 +2862,9 @@ function App() {
                               </span>
                               <span className="mt-0.5 block truncate text-[10px] text-slate-500">
                                 {item.location} · {item.openTime}–
-                                {item.closeTime}
+                                {item.closeTime} ·{" "}
+                                {formatCredits(roomCreditsPerHour(item))}{" "}
+                                créditos/h
                               </span>
                             </span>
                           </span>
@@ -2819,6 +2902,18 @@ function App() {
                               min="1"
                               required
                               defaultValue={item.capacity}
+                              className="form-input mt-1"
+                            />
+                          </label>
+                          <label className="form-label">
+                            Créditos por hora
+                            <input
+                              name="creditsPerHour"
+                              type="number"
+                              min="0"
+                              step="0.5"
+                              required
+                              defaultValue={roomCreditsPerHour(item)}
                               className="form-input mt-1"
                             />
                           </label>
@@ -2893,6 +2988,18 @@ function App() {
                           className="form-input mt-1"
                         />
                       </label>
+                      <label className="form-label">
+                        Créditos por hora
+                        <input
+                          name="creditsPerHour"
+                          type="number"
+                          min="0"
+                          step="0.5"
+                          required
+                          defaultValue="1"
+                          className="form-input mt-1"
+                        />
+                      </label>
                       <div className="grid grid-cols-2 gap-2">
                         <label className="form-label">
                           Abre
@@ -2962,7 +3069,9 @@ function App() {
                               </div>
                               <div className="mt-1 text-[10px] capitalize text-slate-400">
                                 {shortDate(booking.date)} ·{" "}
-                                {booking.hours.toLocaleString("pt-BR")} h
+                                {booking.hours.toLocaleString("pt-BR")} h ·{" "}
+                                {formatCredits(reservationCredits(booking))}{" "}
+                                créditos
                               </div>
                             </div>
                             <button

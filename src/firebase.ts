@@ -32,6 +32,7 @@ export type Room = {
   capacity: number
   openTime: string
   closeTime: string
+  creditsPerHour: number
   color: string
   companyId: string
   active: boolean
@@ -47,6 +48,7 @@ export type Reservation = {
   date: string
   blocks: string[]
   hours: number
+  creditsCost?: number
   status: 'confirmed' | 'cancelled'
   createdAt: number
   slotKeys?: string[]
@@ -86,14 +88,14 @@ export type NewCompany = Pick<Company, 'name' | 'cnpj' | 'legalRepresentative' |
 export type AccessRequest = Profile & { status: 'pending' }
 
 export type PackageInfo = {
-  monthlyHours: number
+  monthlyCredits: number
   label: string
 }
 
 export type WorkspaceData = {
   rooms: Room[]
   reservations: Reservation[]
-  hoursUsed: number
+  creditsUsed: number
   packageInfo: PackageInfo
 }
 
@@ -238,8 +240,8 @@ export function subscribeToCompanies(
           companyData.set(item.id, {
             ...currentCompany,
             packageInfo: packageData
-              ? { label: packageData.label || 'Plano mensal', monthlyHours: packageData.monthlyHours }
-              : { label: 'Plano mensal', monthlyHours: 50 },
+              ? { label: packageData.label || 'Plano mensal', monthlyCredits: packageData.monthlyCredits ?? packageData.monthlyHours ?? 50 }
+              : { label: 'Plano mensal', monthlyCredits: 50 },
           })
           emit()
         },
@@ -401,17 +403,17 @@ export async function initializeUserMonthlyUsage(
   company: string,
   userId: string,
   usageMonth: string,
-  hoursUsed: number,
+  creditsUsed: number,
 ) {
   if (!db) throw new Error('Firebase não está configurado.')
-  if (!Number.isFinite(hoursUsed) || hoursUsed < 0 || !/^\d{4}-\d{2}$/.test(usageMonth)) {
+  if (!Number.isFinite(creditsUsed) || creditsUsed < 0 || !/^\d{4}-\d{2}$/.test(usageMonth)) {
     throw new Error('Não foi possível inicializar um saldo mensal inválido.')
   }
   const usageRef = doc(db, 'companies', company, 'userMonthlyUsage', `${userId}_${usageMonth}`)
   await runTransaction(db, async (transaction) => {
     const usageSnapshot = await transaction.get(usageRef)
     if (usageSnapshot.exists()) return
-    transaction.set(usageRef, { companyId: company, userId, month: usageMonth, hoursUsed })
+    transaction.set(usageRef, { companyId: company, userId, month: usageMonth, creditsUsed })
   })
 }
 
@@ -442,7 +444,7 @@ export function subscribeToWorkspace(
     })(),
     onSnapshot(doc(db, 'companies', company, 'packages', 'active'), (snapshot) => {
       const data = snapshot.data()
-      onData({ packageInfo: data ? { monthlyHours: data.monthlyHours, label: data.label || 'Plano mensal' } : { monthlyHours: 50, label: 'Plano mensal' } })
+      onData({ packageInfo: data ? { monthlyCredits: data.monthlyCredits ?? data.monthlyHours ?? 50, label: data.label || 'Plano mensal' } : { monthlyCredits: 50, label: 'Plano mensal' } })
     }, onError),
   ]
   return () => unsubscribe.forEach((stop) => stop())
@@ -489,10 +491,15 @@ export async function createReservation(
     if (slotSnapshots.some((snapshot) => snapshot.exists())) {
       throw new Error('Um ou mais horários acabaram de ser reservados. Atualize a agenda.')
     }
-    const monthlyHours = Number(packageSnapshot.data()?.monthlyHours ?? 50)
-    const hoursUsed = Number(userUsageSnapshot.data()?.hoursUsed ?? 0)
-    if (hoursUsed + hours > monthlyHours) {
-      throw new Error(`Saldo insuficiente. Restam ${Math.max(0, monthlyHours - hoursUsed).toFixed(1)} horas neste mês.`)
+    const creditsPerHour = Number(roomData.creditsPerHour ?? 1)
+    if (!Number.isFinite(creditsPerHour) || creditsPerHour < 0) {
+      throw new Error('A sala tem uma tarifa de créditos inválida.')
+    }
+    const creditsCost = hours * creditsPerHour
+    const monthlyCredits = Number(packageSnapshot.data()?.monthlyCredits ?? packageSnapshot.data()?.monthlyHours ?? 50)
+    const creditsUsed = Number(userUsageSnapshot.data()?.creditsUsed ?? userUsageSnapshot.data()?.hoursUsed ?? 0)
+    if (creditsUsed + creditsCost > monthlyCredits) {
+      throw new Error(`Créditos insuficientes. Restam ${Math.max(0, monthlyCredits - creditsUsed).toLocaleString('pt-BR')} créditos neste mês.`)
     }
     const reservation: Omit<Reservation, 'id'> = {
       userId: profile.uid,
@@ -504,6 +511,7 @@ export async function createReservation(
       blocks: sortedBlocks,
       slotKeys: sortedBlocks.map((time) => slotId(room.id, date, time)),
       hours,
+      creditsCost,
       status: 'confirmed',
       createdAt: Date.now(),
     }
@@ -517,7 +525,7 @@ export async function createReservation(
     }))
     transaction.set(userUsageRef, {
       month: usageMonth,
-      hoursUsed: hoursUsed + hours,
+      creditsUsed: creditsUsed + creditsCost,
       lastReservationId: bookingId,
       userId: profile.uid,
       companyId: profile.companyId,
@@ -541,12 +549,14 @@ export async function cancelReservation(reservation: Reservation) {
     if (!bookingSnapshot.exists() || bookingSnapshot.data()?.status !== 'confirmed') {
       throw new Error('Esta reserva não está mais ativa.')
     }
-    const userHoursUsed = Number(userUsageSnapshot.data()?.hoursUsed ?? 0)
+    const bookingData = bookingSnapshot.data()
+    const creditsCost = Number(bookingData?.creditsCost ?? bookingData?.hours ?? reservation.hours)
+    const userCreditsUsed = Number(userUsageSnapshot.data()?.creditsUsed ?? userUsageSnapshot.data()?.hoursUsed ?? 0)
     transaction.update(bookingRef, { status: 'cancelled' })
     if (userUsageSnapshot.exists()) {
       transaction.set(userUsageRef, {
         month: usageMonth,
-        hoursUsed: Math.max(0, userHoursUsed - reservation.hours),
+        creditsUsed: Math.max(0, userCreditsUsed - creditsCost),
         lastReservationId: reservation.id,
         userId: reservation.userId,
         companyId: reservation.companyId,
@@ -569,9 +579,9 @@ export async function updateRoom(room: Room) {
 
 export async function savePackage(company: string, packageInfo: PackageInfo) {
   if (!db) throw new Error('Firebase não está configurado.')
-  const normalizedPackage = { label: packageInfo.label.trim(), monthlyHours: packageInfo.monthlyHours }
-  if (!normalizedPackage.label || !Number.isFinite(normalizedPackage.monthlyHours) || normalizedPackage.monthlyHours < 0) {
-    throw new Error('Informe um nome de pacote e uma quantidade válida de horas mensais.')
+  const normalizedPackage = { label: packageInfo.label.trim(), monthlyCredits: packageInfo.monthlyCredits }
+  if (!normalizedPackage.label || !Number.isFinite(normalizedPackage.monthlyCredits) || normalizedPackage.monthlyCredits < 0) {
+    throw new Error('Informe um nome de pacote e uma quantidade válida de créditos mensais.')
   }
   await setDoc(doc(db, 'companies', company, 'packages', 'active'), normalizedPackage)
 }
