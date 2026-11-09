@@ -158,7 +158,6 @@ export function subscribeToProfile(
 }
 
 export function subscribeToPendingAccounts(
-  company: string,
   onData: (accounts: AccessRequest[]) => void,
   onError: (error: Error) => void,
   onNewRequest: (account: AccessRequest) => void,
@@ -166,13 +165,13 @@ export function subscribeToPendingAccounts(
   if (!db) return () => undefined
   let initialized = false
   return onSnapshot(
-    query(collection(db, 'users'), where('companyId', '==', company), where('status', '==', 'pending')),
+    query(collection(db, 'users'), where('status', '==', 'pending')),
     (snapshot) => {
-      onData(snapshot.docs.map((item) => item.data() as AccessRequest))
+      onData(snapshot.docs.map((item) => ({ ...item.data(), uid: item.id }) as AccessRequest))
       if (initialized) {
         snapshot.docChanges()
           .filter((change) => change.type === 'added')
-          .forEach((change) => onNewRequest(change.doc.data() as AccessRequest))
+          .forEach((change) => onNewRequest({ ...change.doc.data(), uid: change.doc.id } as AccessRequest))
       }
       initialized = true
     },

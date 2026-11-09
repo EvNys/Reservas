@@ -22,7 +22,7 @@ Sem credenciais Firebase, o app abre em **modo demonstração**. As reservas de 
    firebase deploy --only firestore:rules,storage --project reservas-ninna
    ```
 
-5. Crie a primeira conta pelo formulário da aplicação. No Firebase Console, localize `users/{uid}` e altere `role` para `admin` e `status` para `approved`. Essa promoção inicial é manual; qualquer administrador aprovado pode acessar as abas **Empresas** e **Usuários**, protegidas também pelas regras do Firestore.
+5. Crie a primeira conta pelo formulário da aplicação. No Firebase Console, localize `users/{uid}` e altere `role` para `admin` e `status` para `approved`. Essa promoção inicial é manual; qualquer administrador aprovado pode acessar as abas **Empresas** e **Usuários**, protegidas também pelas regras do Firestore. Administradores aprovados consultam e decidem a fila global de solicitações pendentes, inclusive de outras empresas.
 6. Entre novamente na aplicação. Em **Empresas**, cadastre as empresas e configure a quantidade mensal de créditos do pacote de cada uma; em **Usuários**, consulte todas as contas e aloque cada uma a uma empresa cadastrada. A alocação preserva o papel e o estado de acesso do usuário. Só é possível excluir uma empresa sem usuários, salas, reservas ou registros de uso vinculados.
 7. Cadastre as salas em **Gestão** e defina os créditos cobrados por hora em cada uma. O pacote mensal de créditos da empresa se aplica individualmente a cada usuário associado; a aprovação de usuários não define pacotes individuais.
 8. Reinicie o Vite após alterar variáveis de ambiente:

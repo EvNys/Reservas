@@ -505,7 +505,6 @@ function App() {
       .then(({ subscribeToPendingAccounts }) => {
         if (cancelled) return;
         unsubscribe = subscribeToPendingAccounts(
-          profile.companyId,
           setPendingAccounts,
           (error) =>
             setToast(`Erro ao carregar solicitações: ${error.message}`),

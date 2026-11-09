@@ -263,7 +263,7 @@ service cloud.firestore {
           'uid', 'name', 'email', 'role', 'companyId', 'status', 'packageLabel', 'monthlyHours'
         ])
       ) || (
-        isAdmin(resource.data.companyId)
+        isGlobalAdmin()
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'role'])
         && (
           (
