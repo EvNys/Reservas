@@ -98,7 +98,6 @@ const demoRooms: Room[] = [
     closeTime: "18:00",
     creditsPerHour: 1,
     color: "blue",
-    companyId,
     active: true,
   },
   {
@@ -110,7 +109,6 @@ const demoRooms: Room[] = [
     closeTime: "19:00",
     creditsPerHour: 1,
     color: "violet",
-    companyId,
     active: true,
   },
   {
@@ -122,7 +120,6 @@ const demoRooms: Room[] = [
     closeTime: "17:00",
     creditsPerHour: 1,
     color: "amber",
-    companyId,
     active: true,
   },
   {
@@ -134,10 +131,19 @@ const demoRooms: Room[] = [
     closeTime: "18:00",
     creditsPerHour: 1,
     color: "emerald",
-    companyId,
     active: true,
   },
 ];
+
+type SavedDemoWorkspace = WorkspaceData & {
+  hoursUsed?: number;
+  packageInfo?: {
+    label?: string;
+    monthlyCredits?: number;
+    monthlyHours?: number;
+  };
+  rooms?: (Room & { creditsPerHour?: number })[];
+};
 
 function localDate(date: Date) {
   const year = date.getFullYear();
@@ -148,6 +154,24 @@ function localDate(date: Date) {
 
 function timestampNow() {
   return Date.now();
+}
+
+function normalizeDemoWorkspace(savedData: SavedDemoWorkspace): WorkspaceData {
+  return {
+    ...savedData,
+    rooms: (savedData.rooms || []).map((room) => ({
+      ...room,
+      creditsPerHour: room.creditsPerHour ?? 1,
+    })),
+    creditsUsed: savedData.creditsUsed ?? savedData.hoursUsed ?? 0,
+    packageInfo: {
+      label: savedData.packageInfo?.label || "Plano mensal",
+      monthlyCredits:
+        savedData.packageInfo?.monthlyCredits ??
+        savedData.packageInfo?.monthlyHours ??
+        50,
+    },
+  };
 }
 
 function seedWorkspace(): WorkspaceData {
@@ -194,32 +218,8 @@ function seedWorkspace(): WorkspaceData {
   ];
   try {
     const saved = localStorage.getItem("reservas-demo");
-    if (saved) {
-      const savedData = JSON.parse(saved) as WorkspaceData & {
-        hoursUsed?: number;
-        packageInfo?: {
-          label?: string;
-          monthlyCredits?: number;
-          monthlyHours?: number;
-        };
-        rooms?: (Room & { creditsPerHour?: number })[];
-      };
-      return {
-        ...savedData,
-        rooms: (savedData.rooms || []).map((room) => ({
-          ...room,
-          creditsPerHour: room.creditsPerHour ?? 1,
-        })),
-        creditsUsed: savedData.creditsUsed ?? savedData.hoursUsed ?? 0,
-        packageInfo: {
-          label: savedData.packageInfo?.label || "Plano mensal",
-          monthlyCredits:
-            savedData.packageInfo?.monthlyCredits ??
-            savedData.packageInfo?.monthlyHours ??
-            50,
-        },
-      };
-    }
+    if (saved)
+      return normalizeDemoWorkspace(JSON.parse(saved) as SavedDemoWorkspace);
   } catch (error) {
     console.error(
       "Não foi possível carregar os dados locais da demonstração.",
@@ -437,6 +437,29 @@ function App() {
   >(null);
   const initializedUsage = useRef(new Set<string>());
   const selectedMonth = date.slice(0, 7);
+
+  useEffect(() => {
+    if (firebaseEnabled) return;
+    function syncDemoWorkspace(event: StorageEvent) {
+      if (event.key !== "reservas-demo") return;
+      try {
+        const data = event.newValue
+          ? normalizeDemoWorkspace(
+              JSON.parse(event.newValue) as SavedDemoWorkspace,
+            )
+          : seedWorkspace();
+        setWorkspaceState({ companyId, data });
+      } catch (error) {
+        console.error(
+          "Não foi possível sincronizar os dados da demonstração entre abas.",
+          error,
+        );
+        setToast("Não foi possível sincronizar os dados da demonstração.");
+      }
+    }
+    window.addEventListener("storage", syncDemoWorkspace);
+    return () => window.removeEventListener("storage", syncDemoWorkspace);
+  }, []);
 
   useEffect(() => {
     if (!firebaseEnabled) return;
@@ -664,6 +687,7 @@ function App() {
       return;
     const monthReservations = workspace.reservations.filter(
       (booking) =>
+        booking.companyId === activeCompanyId &&
         booking.date.slice(0, 7) === selectedMonth &&
         booking.status === "confirmed",
     );
@@ -919,7 +943,6 @@ function App() {
       closeTime: String(form.get("closeTime")),
       creditsPerHour: Number(form.get("creditsPerHour")),
       color: "blue",
-      companyId: profile?.companyId || companyId,
       active: true,
     };
     if (
@@ -1048,7 +1071,7 @@ function App() {
   async function handleDeleteCompany(company: Company) {
     if (
       !window.confirm(
-        `Deseja excluir a empresa ${company.name}? Só será possível excluir empresas sem usuários, salas, reservas, registros de uso ou contratos.`,
+        `Deseja excluir a empresa ${company.name}? Só será possível excluir empresas sem usuários, reservas, registros de uso ou contratos.`,
       )
     )
       return;
@@ -1061,15 +1084,12 @@ function App() {
         const linkedAccounts = allAccounts.filter(
           (account) => account.companyId === company.id,
         ).length;
-        const linkedRooms = workspace.rooms.filter(
-          (room) => room.companyId === company.id,
-        ).length;
         const linkedReservations = workspace.reservations.filter(
           (reservation) => reservation.companyId === company.id,
         ).length;
-        if (linkedAccounts || linkedRooms || linkedReservations) {
+        if (linkedAccounts || linkedReservations) {
           throw new Error(
-            "Existem usuários, salas ou reservas vinculados a esta empresa.",
+            "Existem usuários ou reservas vinculados a esta empresa.",
           );
         }
       }
@@ -1555,7 +1575,7 @@ function App() {
                           Escolha uma sala
                         </h2>
                         <p className="mt-1 text-xs text-slate-500">
-                          {rooms.length} espaços disponíveis na empresa
+                          {rooms.length} espaços disponíveis para todas as empresas
                         </p>
                       </div>
                       <span className="flex items-center gap-1.5 rounded-md bg-emerald-50 px-2.5 py-1.5 text-[10px] font-semibold text-emerald-700">
@@ -2687,7 +2707,11 @@ function App() {
                   <div className="space-y-2">
                     {filteredAccounts.map((account) => {
                       const bookings = workspace.reservations
-                        .filter((booking) => booking.userId === account.uid)
+                        .filter(
+                          (booking) =>
+                            booking.companyId === activeCompanyId &&
+                            booking.userId === account.uid,
+                        )
                         .sort((left, right) =>
                           right.date.localeCompare(left.date),
                         );
@@ -3055,6 +3079,7 @@ function App() {
                       {workspace.reservations
                         .filter(
                           (item) =>
+                            item.companyId === activeCompanyId &&
                             item.status === "confirmed" && item.date >= today,
                         )
                         .slice()

@@ -8,6 +8,7 @@ import {
 } from 'firebase/auth'
 import {
   collection,
+  deleteField,
   deleteDoc,
   doc,
   getDocs,
@@ -34,7 +35,6 @@ export type Room = {
   closeTime: string
   creditsPerHour: number
   color: string
-  companyId: string
   active: boolean
 }
 
@@ -356,9 +356,8 @@ export async function deleteCompanyContract(company: string, contract: CompanyCo
 
 export async function deleteCompanyIfUnused(company: string) {
   if (!db) throw new Error('Firebase não está configurado.')
-  const [users, rooms, reservations, monthlyUsage, userMonthlyUsage, packages, contracts] = await Promise.all([
+  const [users, reservations, monthlyUsage, userMonthlyUsage, packages, contracts] = await Promise.all([
     getDocs(query(collection(db, 'users'), where('companyId', '==', company))),
-    getDocs(query(collection(db, 'rooms'), where('companyId', '==', company))),
     getDocs(query(collection(db, 'reservations'), where('companyId', '==', company))),
     getDocs(collection(db, 'companies', company, 'monthlyUsage')),
     getDocs(collection(db, 'companies', company, 'userMonthlyUsage')),
@@ -367,7 +366,6 @@ export async function deleteCompanyIfUnused(company: string) {
   ])
   const references = [
     [users.size, 'usuários'],
-    [rooms.size, 'salas'],
     [reservations.size, 'reservas'],
     [monthlyUsage.size + userMonthlyUsage.size, 'registros de uso'],
     [contracts.size, 'contratos'],
@@ -425,14 +423,14 @@ export function subscribeToWorkspace(
   if (!db) return () => undefined
   const unsubscribe = [
     onSnapshot(
-      query(collection(db, 'rooms'), where('companyId', '==', company)),
+      collection(db, 'rooms'),
       (snapshot) => onData({ rooms: snapshot.docs.map((item) => ({ id: item.id, ...item.data() }) as Room) }),
       onError,
     ),
     (() => {
       let initialized = false
       return onSnapshot(
-        query(collection(db, 'reservations'), where('companyId', '==', company)),
+        collection(db, 'reservations'),
         (snapshot) => {
           onData({ reservations: snapshot.docs.map((item) => ({ id: item.id, ...item.data() }) as Reservation) })
           if (!initialized) onReservationsLoaded()
@@ -471,8 +469,8 @@ export async function createReservation(
   const bookingRef = doc(db, 'reservations', bookingId)
   const roomRef = doc(db, 'rooms', room.id)
   const usageMonth = monthKey(new Date(`${date}T12:00:00`))
-  const userUsageRef = doc(db, 'companies', room.companyId, 'userMonthlyUsage', `${profile.uid}_${usageMonth}`)
-  const packageRef = doc(db, 'companies', room.companyId, 'packages', 'active')
+  const userUsageRef = doc(db, 'companies', profile.companyId, 'userMonthlyUsage', `${profile.uid}_${usageMonth}`)
+  const packageRef = doc(db, 'companies', profile.companyId, 'packages', 'active')
   const slotRefs = sortedBlocks.map((time) => doc(db!, 'roomSlots', slotId(room.id, date, time)))
   const hours = sortedBlocks.length * 0.5
 
@@ -484,7 +482,7 @@ export async function createReservation(
       transaction.get(packageRef),
     ])
     const roomData = roomSnapshot.data()
-    if (!roomSnapshot.exists() || roomData?.active !== true || roomData.companyId !== room.companyId || typeof roomData.name !== 'string') {
+    if (!roomSnapshot.exists() || roomData?.active !== true || typeof roomData.name !== 'string') {
       throw new Error('A sala não está disponível para reservas.')
     }
     if (slotSnapshots.some((snapshot) => snapshot.exists())) {
@@ -503,7 +501,7 @@ export async function createReservation(
     const reservation: Omit<Reservation, 'id'> = {
       userId: profile.uid,
       userName: profile.name,
-      companyId: roomData.companyId,
+      companyId: profile.companyId,
       roomId: room.id,
       roomName: roomData.name,
       date,
@@ -517,7 +515,7 @@ export async function createReservation(
     transaction.set(bookingRef, reservation)
     slotRefs.forEach((reference, index) => transaction.set(reference, {
       reservationId: bookingId,
-      companyId: roomData.companyId,
+      companyId: profile.companyId,
       roomId: room.id,
       date,
       time: sortedBlocks[index],
@@ -573,7 +571,7 @@ export async function addRoom(room: Omit<Room, 'id'>) {
 export async function updateRoom(room: Room) {
   if (!db) throw new Error('Firebase não está configurado.')
   const { id, ...roomData } = room
-  await updateDoc(doc(db, 'rooms', id), roomData)
+  await updateDoc(doc(db, 'rooms', id), { ...roomData, companyId: deleteField() })
 }
 
 export async function savePackage(company: string, packageInfo: PackageInfo) {
