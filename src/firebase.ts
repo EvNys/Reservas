@@ -224,8 +224,25 @@ export function subscribeToAllAccounts(
 ) {
   if (!db) return () => undefined
   return onSnapshot(collection(db, 'users'), (snapshot) => {
-    onData(snapshot.docs.map((item) => ({ ...item.data(), uid: item.id }) as Profile))
+    onData(snapshot.docs
+      .map((item) => ({ ...item.data(), uid: item.id }) as Profile)
+      .filter((account) => account.status !== 'rejected'))
   }, onError)
+}
+
+export async function deleteRejectedAccounts() {
+  if (!db) throw new Error('Firebase não está configurado.')
+  while (true) {
+    const snapshot = await getDocs(query(
+      collection(db, 'users'),
+      where('status', '==', 'rejected'),
+      limit(450),
+    ))
+    if (snapshot.empty) return
+    const batch = writeBatch(db)
+    snapshot.docs.forEach((item) => batch.delete(item.ref))
+    await batch.commit()
+  }
 }
 
 export function subscribeToCompanies(
@@ -432,7 +449,12 @@ export async function updateAccountAccess(
   role: Profile['role'],
 ) {
   if (!db) throw new Error('Firebase não está configurado.')
-  await updateDoc(doc(db, 'users', uid), {
+  const accountRef = doc(db, 'users', uid)
+  if (status === 'rejected') {
+    await deleteDoc(accountRef)
+    return
+  }
+  await updateDoc(accountRef, {
     status,
     role,
   })

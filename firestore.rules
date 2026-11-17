@@ -330,7 +330,11 @@ service cloud.firestore {
         && request.resource.data.companyId.size() > 0
         && exists(/databases/$(database)/documents/companies/$(request.resource.data.companyId))
       );
-      allow delete: if isAdmin(resource.data.companyId);
+      allow delete: if isAdmin(resource.data.companyId)
+        || (
+          isGlobalAdmin()
+          && resource.data.status in ['pending', 'rejected']
+        );
     }
 
     match /auditLogs/{auditLogId} {

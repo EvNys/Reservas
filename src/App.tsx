@@ -590,7 +590,12 @@ function App() {
     let cancelled = false;
     void import("./firebase")
       .then(
-        ({ ensureCompany, subscribeToAllAccounts, subscribeToCompanies }) => {
+        ({
+          deleteRejectedAccounts,
+          ensureCompany,
+          subscribeToAllAccounts,
+          subscribeToCompanies,
+        }) => {
           if (cancelled) return;
           unsubscribeAccounts = subscribeToAllAccounts(
             (accounts) => {
@@ -608,6 +613,11 @@ function App() {
           );
           unsubscribeCompanies = subscribeToCompanies(setCompanies, (error) =>
             setToast(`Erro ao carregar empresas: ${error.message}`),
+          );
+          void deleteRejectedAccounts().catch((error: unknown) =>
+            setToast(
+              `Erro ao excluir perfis rejeitados: ${errorMessage(error)}`,
+            ),
           );
           void ensureCompany(companyId, "Empresa principal").catch(
             (error: unknown) =>
@@ -1474,7 +1484,7 @@ function App() {
       setToast(
         approved
           ? `Acesso permitido para ${account.name} como ${role === "admin" ? "administrador" : "usuário"}.`
-          : `Solicitação de ${account.name} recusada.`,
+          : `Solicitação de ${account.name} recusada e perfil removido.`,
       );
       await recordAuditEvent({
         companyId: account.companyId,
@@ -2733,9 +2743,7 @@ function App() {
                       const statusLabel =
                         account.status === "pending"
                           ? "Pendente"
-                          : account.status === "rejected"
-                            ? "Recusado"
-                            : "Ativo";
+                          : "Ativo";
                       return (
                         <div
                           key={account.uid}
@@ -2751,7 +2759,7 @@ function App() {
                             </div>
                           </div>
                           <span
-                            className={`rounded-full px-2.5 py-1 text-[10px] font-medium ${account.status === "pending" ? "bg-amber-50 text-amber-700" : account.status === "rejected" ? "bg-rose-50 text-rose-700" : "bg-emerald-50 text-emerald-700"}`}
+                            className={`rounded-full px-2.5 py-1 text-[10px] font-medium ${account.status === "pending" ? "bg-amber-50 text-amber-700" : "bg-emerald-50 text-emerald-700"}`}
                           >
                             {statusLabel}
                           </span>
