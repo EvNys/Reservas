@@ -14,15 +14,18 @@ import {
   getDocs,
   getDoc,
   getFirestore,
+  limit,
   onSnapshot,
+  orderBy,
   query,
   runTransaction,
   setDoc,
   addDoc,
   updateDoc,
   where,
+  writeBatch,
 } from 'firebase/firestore'
-import { deleteObject, getBytes, getStorage, ref, uploadBytes } from 'firebase/storage'
+import { deleteObject, getBytes, getStorage, ref } from 'firebase/storage'
 import type { User } from 'firebase/auth'
 import { companyId, firebaseConfig, firebaseEnabled, storageEnabled } from './firebase-config'
 
@@ -78,8 +81,9 @@ export type Company = {
 export type CompanyContract = {
   id: string
   name: string
-  size: number
-  storagePath: string
+  text?: string
+  size?: number
+  storagePath?: string
   createdAt: number
 }
 
@@ -98,6 +102,24 @@ export type WorkspaceData = {
   creditsUsed: number
   packageInfo: PackageInfo
 }
+
+export type AuditLog = {
+  id: string
+  actorUid: string
+  actorName: string
+  actorRole: Profile['role']
+  companyId: string
+  action: string
+  entityType: string
+  entityId: string
+  details: string
+  createdAt: number
+}
+
+export type NewAuditLog = Pick<
+  AuditLog,
+  'companyId' | 'action' | 'entityType' | 'entityId' | 'details'
+>
 
 export const auth = firebaseEnabled
   ? getAuth(initializeApp(firebaseConfig))
@@ -306,50 +328,70 @@ export function subscribeToCompanyContracts(
   }, onError)
 }
 
-export async function uploadCompanyContract(company: string, file: File): Promise<CompanyContract> {
-  if (!db) throw new Error('Firebase não está configurado.')
-  if (!storage) throw new Error('Configure o bucket do Firebase Storage para importar contratos.')
-  if (file.type !== 'application/pdf' && !file.name.toLocaleLowerCase().endsWith('.pdf')) {
-    throw new Error('Selecione somente arquivos PDF.')
-  }
-  if (file.size > 15 * 1024 * 1024) {
-    throw new Error('Cada contrato deve ter no máximo 15 MB.')
-  }
+export function subscribeToAuditLogs(
+  onData: (logs: AuditLog[]) => void,
+  onError: (error: Error) => void,
+) {
+  if (!db) return () => undefined
+  return onSnapshot(
+    query(collection(db, 'auditLogs'), orderBy('createdAt', 'desc'), limit(500)),
+    (snapshot) => onData(snapshot.docs.map((item) => ({ id: item.id, ...item.data() }) as AuditLog)),
+    onError,
+  )
+}
 
-  const contractRef = doc(collection(db, 'companies', company, 'contracts'))
-  const storagePath = `companies/${company}/contracts/${contractRef.id}.pdf`
-  const storageRef = ref(storage, storagePath)
-  await uploadBytes(storageRef, file, { contentType: 'application/pdf' })
-  try {
-    const contract: CompanyContract = {
-      id: contractRef.id,
-      name: file.name,
-      size: file.size,
-      storagePath,
-      createdAt: Date.now(),
-    }
-    const { id: _id, ...contractData } = contract
-    await setDoc(contractRef, contractData)
-    return contract
-  } catch (error) {
-    await deleteObject(storageRef)
-    throw error
+export async function createAuditLog(profile: Profile, event: NewAuditLog) {
+  if (!db) throw new Error('Firebase não está configurado.')
+  await addDoc(collection(db, 'auditLogs'), {
+    ...event,
+    actorUid: profile.uid,
+    actorName: profile.name,
+    actorRole: profile.role,
+    createdAt: Date.now(),
+  })
+}
+
+export async function clearAuditLogs() {
+  if (!db) throw new Error('Firebase não está configurado.')
+  while (true) {
+    const snapshot = await getDocs(query(collection(db, 'auditLogs'), limit(450)))
+    if (snapshot.empty) return
+    const batch = writeBatch(db)
+    snapshot.docs.forEach((item) => batch.delete(item.ref))
+    await batch.commit()
   }
 }
 
+export async function saveCompanyContract(company: string, text: string): Promise<CompanyContract> {
+  if (!db) throw new Error('Firebase não está configurado.')
+  const contractRef = doc(collection(db, 'companies', company, 'contracts'))
+  const contract: CompanyContract = {
+    id: contractRef.id,
+    name: 'Contrato',
+    text: text.trim(),
+    createdAt: Date.now(),
+  }
+  const { id: _id, ...contractData } = contract
+  await setDoc(contractRef, contractData)
+  return contract
+}
+
 export async function downloadCompanyContract(contract: CompanyContract): Promise<Blob> {
-  if (!storage) throw new Error('Configure o bucket do Firebase Storage para consultar contratos.')
+  if (!storage || !contract.storagePath) {
+    throw new Error('Este contrato não possui um arquivo PDF disponível.')
+  }
   const bytes = await getBytes(ref(storage, contract.storagePath))
   return new Blob([bytes], { type: 'application/pdf' })
 }
 
 export async function deleteCompanyContract(company: string, contract: CompanyContract) {
   if (!db) throw new Error('Firebase não está configurado.')
-  if (!storage) throw new Error('Configure o bucket do Firebase Storage para remover contratos.')
-  try {
-    await deleteObject(ref(storage, contract.storagePath))
-  } catch (error) {
-    if (!(error instanceof Error) || !('code' in error) || error.code !== 'storage/object-not-found') throw error
+  if (contract.storagePath && storage) {
+    try {
+      await deleteObject(ref(storage, contract.storagePath))
+    } catch (error) {
+      if (!(error instanceof Error) || !('code' in error) || error.code !== 'storage/object-not-found') throw error
+    }
   }
   await deleteDoc(doc(db, 'companies', company, 'contracts', contract.id))
 }
@@ -528,6 +570,7 @@ export async function createReservation(
       companyId: profile.companyId,
     })
   })
+  return bookingId
 }
 
 export async function cancelReservation(reservation: Reservation) {
@@ -565,7 +608,8 @@ export async function cancelReservation(reservation: Reservation) {
 
 export async function addRoom(room: Omit<Room, 'id'>) {
   if (!db) throw new Error('Firebase não está configurado.')
-  await addDoc(collection(db, 'rooms'), room)
+  const roomRef = await addDoc(collection(db, 'rooms'), room)
+  return roomRef.id
 }
 
 export async function updateRoom(room: Room) {

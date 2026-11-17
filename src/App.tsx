@@ -9,6 +9,7 @@ import {
   Building2,
   CalendarDays,
   Check,
+  ClipboardList,
   CircleHelp,
   Clock3,
   DoorOpen,
@@ -30,20 +31,21 @@ import {
 import {
   companyId,
   firebaseEnabled,
-  storageEnabled,
   whatsappNumber,
 } from "./firebase-config";
 import type {
   AccessRequest,
+  AuditLog,
   Company,
   CompanyContract,
+  NewAuditLog,
   Profile,
   Reservation,
   Room,
   WorkspaceData,
 } from "./firebase";
 
-type View = "reserve" | "mine" | "manage" | "companies" | "users";
+type View = "reserve" | "mine" | "manage" | "companies" | "users" | "audit";
 
 const initialDate = localDate(new Date());
 const emptyWorkspaceData: WorkspaceData = {
@@ -375,6 +377,9 @@ function App() {
   const [companyContracts, setCompanyContracts] = useState<
     Record<string, CompanyContract[]>
   >({});
+  const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
+  const [auditLogsLoaded, setAuditLogsLoaded] = useState(!firebaseEnabled);
+  const [clearingAuditLogs, setClearingAuditLogs] = useState(false);
   const [accountRoles, setAccountRoles] = useState<
     Record<string, Profile["role"]>
   >({});
@@ -393,7 +398,10 @@ function App() {
   const [savingCompanyAccounts, setSavingCompanyAccounts] = useState<
     Record<string, boolean>
   >({});
-  const [uploadingCompanyContracts, setUploadingCompanyContracts] = useState<
+  const [companyContractDrafts, setCompanyContractDrafts] = useState<
+    Record<string, string>
+  >({});
+  const [savingCompanyContracts, setSavingCompanyContracts] = useState<
     Record<string, boolean>
   >({});
   const [deletingCompanyContracts, setDeletingCompanyContracts] = useState<
@@ -655,6 +663,34 @@ function App() {
   }, [companies, isAdmin]);
 
   useEffect(() => {
+    if (!firebaseEnabled || !isAdmin) return;
+    let cancelled = false;
+    let unsubscribe = () => {};
+    void import("./firebase")
+      .then(({ subscribeToAuditLogs }) => {
+        if (cancelled) return;
+        unsubscribe = subscribeToAuditLogs(
+          (logs) => {
+            setAuditLogs(logs);
+            setAuditLogsLoaded(true);
+          },
+          (error) => {
+            setAuditLogsLoaded(true);
+            setToast(`Erro ao carregar o audit log: ${error.message}`);
+          },
+        );
+      })
+      .catch((error: unknown) => {
+        setAuditLogsLoaded(true);
+        setToast(`Erro ao carregar o audit log: ${errorMessage(error)}`);
+      });
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, [isAdmin]);
+
+  useEffect(() => {
     if (!firebaseEnabled || !profile) return;
     let unsubscribe: () => void = () => {};
     let cancelled = false;
@@ -804,6 +840,62 @@ function App() {
     setSelectedBlocks([]);
   }
 
+  async function recordAuditEvent(event: NewAuditLog) {
+    if (!profile) return;
+    const createdAt = timestampNow();
+    if (!firebaseEnabled) {
+      setAuditLogs((current) =>
+        [
+          {
+            ...event,
+            id: `demo-audit-${createdAt}-${Math.random().toString(36).slice(2)}`,
+            actorUid: profile.uid,
+            actorName: profile.name,
+            actorRole: profile.role,
+            createdAt,
+          },
+          ...current,
+        ].slice(0, 500),
+      );
+      setAuditLogsLoaded(true);
+      return;
+    }
+    try {
+      const { createAuditLog } = await import("./firebase");
+      await createAuditLog(profile, event);
+    } catch (error) {
+      console.error("Não foi possível registrar o evento de auditoria.", error);
+      setToast(
+        `A operação foi concluída, mas não foi possível registrar no audit log: ${errorMessage(error)}`,
+      );
+    }
+  }
+
+  async function handleClearAuditLogs() {
+    if (!isAdmin || !auditLogs.length) return;
+    if (
+      !window.confirm(
+        "Deseja limpar todo o audit log? Esta ação não pode ser desfeita.",
+      )
+    ) {
+      return;
+    }
+    setClearingAuditLogs(true);
+    try {
+      if (firebaseEnabled) {
+        const { clearAuditLogs } = await import("./firebase");
+        await clearAuditLogs();
+      } else {
+        setAuditLogs([]);
+      }
+      setToast("Audit log limpo com sucesso.");
+    } catch (error) {
+      setToast(`Não foi possível limpar o audit log: ${errorMessage(error)}`);
+    } finally {
+      setClearingAuditLogs(false);
+    }
+  }
+
   async function handleBooking() {
     if (!profile || !room || !selectedBlocks.length) return;
     if (bookingCredits > remaining) {
@@ -814,9 +906,15 @@ function App() {
     }
     setBusy(true);
     try {
+      let reservationId: string;
       if (firebaseEnabled) {
         const { createReservation } = await import("./firebase");
-        await createReservation(profile, room, date, selectedBlocks);
+        reservationId = await createReservation(
+          profile,
+          room,
+          date,
+          selectedBlocks,
+        );
       } else {
         if (selectedBlocks.some((block) => occupiedBlocks.has(block))) {
           throw new Error(
@@ -838,6 +936,7 @@ function App() {
           status: "confirmed",
           createdAt,
         };
+        reservationId = reservation.id;
         const updated: WorkspaceData = {
           ...workspace,
           reservations: [...workspace.reservations, reservation],
@@ -851,6 +950,13 @@ function App() {
       }
       setSelectedBlocks([]);
       setToast("Reserva confirmada. A sala já está garantida para você.");
+      await recordAuditEvent({
+        companyId: profile.companyId,
+        action: "Reserva criada",
+        entityType: "Reserva",
+        entityId: reservationId,
+        details: `${room.name} · ${shortDate(date)} · ${selectedBlocks.join(", ")}`,
+      });
     } catch (error) {
       setToast(errorMessage(error));
     } finally {
@@ -926,6 +1032,13 @@ function App() {
         saveDemoWorkspace(updated);
       }
       setToast("Reserva cancelada e horários liberados.");
+      await recordAuditEvent({
+        companyId: reservation.companyId,
+        action: "Reserva cancelada",
+        entityType: "Reserva",
+        entityId: reservation.id,
+        details: `${reservation.roomName} · ${shortDate(reservation.date)}`,
+      });
     } catch (error) {
       setToast(errorMessage(error));
     }
@@ -953,19 +1066,28 @@ function App() {
       return;
     }
     try {
+      let roomId: string;
       if (firebaseEnabled) {
         const { addRoom } = await import("./firebase");
-        await addRoom(newRoom);
+        roomId = await addRoom(newRoom);
       } else {
+        roomId = `sala-${Date.now()}`;
         const updated = {
           ...workspace,
-          rooms: [...workspace.rooms, { ...newRoom, id: `sala-${Date.now()}` }],
+          rooms: [...workspace.rooms, { ...newRoom, id: roomId }],
         };
         setWorkspace(updated);
         saveDemoWorkspace(updated);
       }
       formElement.reset();
       setToast("Sala adicionada com sucesso.");
+      await recordAuditEvent({
+        companyId: activeCompanyId,
+        action: "Sala adicionada",
+        entityType: "Sala",
+        entityId: roomId,
+        details: newRoom.name,
+      });
     } catch (error) {
       setToast(errorMessage(error));
     }
@@ -1009,6 +1131,13 @@ function App() {
         saveDemoWorkspace(updated);
       }
       setToast("Configurações da sala atualizadas.");
+      await recordAuditEvent({
+        companyId: activeCompanyId,
+        action: "Sala atualizada",
+        entityType: "Sala",
+        entityId: room.id,
+        details: updatedRoom.name,
+      });
     } catch (error) {
       setToast(errorMessage(error));
     }
@@ -1056,6 +1185,13 @@ function App() {
       }
       formElement.reset();
       setToast(`Pacote da empresa ${company.name} atualizado.`);
+      await recordAuditEvent({
+        companyId: company.id,
+        action: "Pacote atualizado",
+        entityType: "Pacote",
+        entityId: company.id,
+        details: `${company.name} · ${nextPackage.label} · ${nextPackage.monthlyCredits} créditos`,
+      });
     } catch (error) {
       setToast(
         `Não foi possível salvar o pacote de ${company.name}: ${errorMessage(error)}`,
@@ -1097,6 +1233,13 @@ function App() {
         current.filter((item) => item.id !== company.id),
       );
       setToast(`Empresa ${company.name} excluída.`);
+      await recordAuditEvent({
+        companyId: company.id,
+        action: "Empresa excluída",
+        entityType: "Empresa",
+        entityId: company.id,
+        details: company.name,
+      });
     } catch (error) {
       setToast(
         `Não foi possível excluir ${company.name}: ${errorMessage(error)}`,
@@ -1124,15 +1267,18 @@ function App() {
     }
     setCompanyBusy(true);
     try {
+      let createdCompanyId: string;
       if (firebaseEnabled) {
         const { createCompany } = await import("./firebase");
         const company = await createCompany(details);
+        createdCompanyId = company.id;
         setCompanies((current) => [...current, company]);
       } else {
+        createdCompanyId = `empresa-${Date.now()}`;
         setCompanies((current) => [
           ...current,
           {
-            id: `empresa-${Date.now()}`,
+            id: createdCompanyId,
             ...details,
             createdAt: Date.now(),
           },
@@ -1140,6 +1286,13 @@ function App() {
       }
       formElement.reset();
       setToast(`Empresa ${details.name} cadastrada com sucesso.`);
+      await recordAuditEvent({
+        companyId: createdCompanyId,
+        action: "Empresa criada",
+        entityType: "Empresa",
+        entityId: createdCompanyId,
+        details: details.name,
+      });
     } catch (error) {
       setToast(`Não foi possível cadastrar a empresa: ${errorMessage(error)}`);
     } finally {
@@ -1147,31 +1300,70 @@ function App() {
     }
   }
 
-  async function handleUploadCompanyContracts(
+  async function handleSaveCompanyContract(
     company: Company,
-    input: HTMLInputElement,
+    event: FormEvent<HTMLFormElement>,
   ) {
-    const files = Array.from(input.files || []);
-    if (!files.length) return;
-    setUploadingCompanyContracts((current) => ({
+    event.preventDefault();
+    const text = companyContractDrafts[company.id]?.trim() || "";
+    if (!text) {
+      setToast("Cole o texto do contrato antes de salvar.");
+      return;
+    }
+    setSavingCompanyContracts((current) => ({
       ...current,
       [company.id]: true,
     }));
     try {
-      const { uploadCompanyContract } = await import("./firebase");
-      for (const file of files) await uploadCompanyContract(company.id, file);
-      setToast(
-        `${files.length} ${files.length === 1 ? "contrato importado" : "contratos importados"} para ${company.name}.`,
-      );
+      const { saveCompanyContract } = await import("./firebase");
+      const contract = await saveCompanyContract(company.id, text);
+      setCompanyContractDrafts((current) => ({
+        ...current,
+        [company.id]: "",
+      }));
+      setToast(`Contrato salvo para ${company.name}.`);
+      await recordAuditEvent({
+        companyId: company.id,
+        action: "Contrato salvo",
+        entityType: "Contrato",
+        entityId: contract.id,
+        details: company.name,
+      });
     } catch (error) {
-      setToast(
-        `Não foi possível importar os contratos: ${errorMessage(error)}`,
-      );
+      setToast(`Não foi possível salvar o contrato: ${errorMessage(error)}`);
     } finally {
-      input.value = "";
-      setUploadingCompanyContracts((current) => ({
+      setSavingCompanyContracts((current) => ({
         ...current,
         [company.id]: false,
+      }));
+    }
+  }
+
+  async function handleDeleteCompanyContract(
+    company: Company,
+    contract: CompanyContract,
+  ) {
+    setDeletingCompanyContracts((current) => ({
+      ...current,
+      [contract.id]: true,
+    }));
+    try {
+      const { deleteCompanyContract } = await import("./firebase");
+      await deleteCompanyContract(company.id, contract);
+      setToast(`Contrato ${contract.name} removido.`);
+      await recordAuditEvent({
+        companyId: company.id,
+        action: "Contrato removido",
+        entityType: "Contrato",
+        entityId: contract.id,
+        details: `${company.name} · ${contract.name}`,
+      });
+    } catch (error) {
+      setToast(`Não foi possível remover o contrato: ${errorMessage(error)}`);
+    } finally {
+      setDeletingCompanyContracts((current) => ({
+        ...current,
+        [contract.id]: false,
       }));
     }
   }
@@ -1188,28 +1380,6 @@ function App() {
       window.setTimeout(() => URL.revokeObjectURL(url), 1000);
     } catch (error) {
       setToast(`Não foi possível baixar o contrato: ${errorMessage(error)}`);
-    }
-  }
-
-  async function handleDeleteCompanyContract(
-    company: Company,
-    contract: CompanyContract,
-  ) {
-    setDeletingCompanyContracts((current) => ({
-      ...current,
-      [contract.id]: true,
-    }));
-    try {
-      const { deleteCompanyContract } = await import("./firebase");
-      await deleteCompanyContract(company.id, contract);
-      setToast(`Contrato ${contract.name} removido.`);
-    } catch (error) {
-      setToast(`Não foi possível remover o contrato: ${errorMessage(error)}`);
-    } finally {
-      setDeletingCompanyContracts((current) => ({
-        ...current,
-        [contract.id]: false,
-      }));
     }
   }
 
@@ -1256,6 +1426,13 @@ function App() {
         (company) => company.id === nextCompanyId,
       )?.name;
       setToast(`${account.name} alocado(a) à empresa ${companyName}.`);
+      await recordAuditEvent({
+        companyId: nextCompanyId,
+        action: "Usuário alocado",
+        entityType: "Usuário",
+        entityId: account.uid,
+        details: `${account.name} · ${companyName || nextCompanyId}`,
+      });
     } catch (error) {
       setToast(
         `Não foi possível alocar ${account.name}: ${errorMessage(error)}`,
@@ -1299,6 +1476,13 @@ function App() {
           ? `Acesso permitido para ${account.name} como ${role === "admin" ? "administrador" : "usuário"}.`
           : `Solicitação de ${account.name} recusada.`,
       );
+      await recordAuditEvent({
+        companyId: account.companyId,
+        action: approved ? "Acesso aprovado" : "Acesso recusado",
+        entityType: "Usuário",
+        entityId: account.uid,
+        details: `${account.name}${approved ? ` · papel ${role}` : ""}`,
+      });
     } catch (error) {
       setToast(`Não foi possível atualizar o acesso: ${errorMessage(error)}`);
     }
@@ -1346,6 +1530,7 @@ function App() {
     manage: "Gestão",
     companies: "Empresas",
     users: "Usuários",
+    audit: "Auditoria",
   };
 
   return (
@@ -1423,6 +1608,15 @@ function App() {
                 label="Usuários"
                 onClick={() => {
                   setView("users");
+                  setSidebarOpen(false);
+                }}
+              />
+              <SideLink
+                active={view === "audit"}
+                icon={<ClipboardList size={18} />}
+                label="Auditoria"
+                onClick={() => {
+                  setView("audit");
                   setSidebarOpen(false);
                 }}
               />
@@ -2301,81 +2495,107 @@ function App() {
                               <div className="flex flex-wrap items-center justify-between gap-3">
                                 <div>
                                   <h3 className="text-xs font-bold">
-                                    Contratos em PDF
+                                    Texto dos contratos
                                   </h3>
                                   <p className="mt-1 text-[10px] text-slate-500">
-                                    Anexe contratos para consultar os créditos
-                                    previstas. Máximo de 15 MB por arquivo.
+                                    Cole o texto do contrato para registrar e
+                                    consultar as condições acordadas.
                                   </p>
                                 </div>
-                                <label
-                                  className={`flex cursor-pointer items-center gap-2 rounded-lg px-3 py-2 text-[10px] font-semibold text-white ${uploadingCompanyContracts[company.id] || !firebaseEnabled || !storageEnabled ? "cursor-not-allowed bg-slate-400" : "bg-blue-600 hover:bg-blue-700"}`}
-                                >
-                                  <Plus size={14} />
-                                  {uploadingCompanyContracts[company.id]
-                                    ? "Importando…"
-                                    : "Importar PDFs"}
-                                  <input
-                                    type="file"
-                                    accept="application/pdf,.pdf"
-                                    multiple
-                                    disabled={
-                                      uploadingCompanyContracts[company.id] ||
-                                      !firebaseEnabled ||
-                                      !storageEnabled
+                              </div>
+                              <form
+                                onSubmit={(event) =>
+                                  void handleSaveCompanyContract(company, event)
+                                }
+                                className="mt-3 grid gap-2"
+                              >
+                                <label className="form-label">
+                                  Texto do contrato
+                                  <textarea
+                                    value={
+                                      companyContractDrafts[company.id] || ""
                                     }
                                     onChange={(event) =>
-                                      void handleUploadCompanyContracts(
-                                        company,
-                                        event.currentTarget,
-                                      )
+                                      setCompanyContractDrafts((current) => ({
+                                        ...current,
+                                        [company.id]: event.target.value,
+                                      }))
                                     }
-                                    className="sr-only"
+                                    placeholder="Cole aqui o texto completo do contrato"
+                                    rows={6}
+                                    disabled={!firebaseEnabled}
+                                    className="form-input mt-1.5 min-h-32 resize-y text-xs"
                                   />
                                 </label>
-                              </div>
-                              {!storageEnabled && (
-                                <p className="mt-2 text-[10px] text-amber-700">
-                                  Configure o bucket do Firebase Storage para
-                                  habilitar o envio e a consulta de contratos.
-                                </p>
-                              )}
+                                <button
+                                  type="submit"
+                                  disabled={
+                                    savingCompanyContracts[company.id] ||
+                                    !firebaseEnabled
+                                  }
+                                  className="inline-flex w-fit items-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-[10px] font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-slate-400"
+                                >
+                                  <Plus size={14} />
+                                  {savingCompanyContracts[company.id]
+                                    ? "Salvando…"
+                                    : "Salvar contrato"}
+                                </button>
+                              </form>
                               {companyContracts[company.id]?.length ? (
                                 <ul className="mt-3 divide-y divide-slate-100">
                                   {companyContracts[company.id].map(
                                     (contract) => (
                                       <li
                                         key={contract.id}
-                                        className="flex flex-wrap items-center gap-2 py-2"
+                                        className="flex items-start gap-2 py-3"
                                       >
                                         <FileText
                                           size={15}
-                                          className="shrink-0 text-rose-600"
+                                          className="mt-0.5 shrink-0 text-blue-600"
                                         />
-                                        <span className="min-w-0 flex-1 break-all text-[11px] font-medium text-slate-700">
-                                          {contract.name}
-                                        </span>
-                                        <span className="text-[10px] text-slate-400">
-                                          {(
-                                            contract.size /
-                                            (1024 * 1024)
-                                          ).toLocaleString("pt-BR", {
-                                            maximumFractionDigits: 1,
-                                          })}{" "}
-                                          MB
-                                        </span>
-                                        <button
-                                          onClick={() =>
-                                            void handleDownloadCompanyContract(
-                                              contract,
-                                            )
-                                          }
-                                          className="rounded-md p-1.5 text-blue-700 hover:bg-blue-50"
-                                          aria-label={`Baixar ${contract.name}`}
-                                          title="Baixar contrato"
-                                        >
-                                          <Download size={15} />
-                                        </button>
+                                        <div className="min-w-0 flex-1">
+                                          <p className="text-[11px] font-medium text-slate-700">
+                                            {contract.name || "Contrato"}
+                                            {contract.createdAt ? (
+                                              <span className="ml-2 font-normal text-slate-400">
+                                                {new Date(
+                                                  contract.createdAt,
+                                                ).toLocaleDateString("pt-BR")}
+                                              </span>
+                                            ) : null}
+                                          </p>
+                                          {contract.text ? (
+                                            <details className="mt-1">
+                                              <summary className="cursor-pointer text-[10px] text-blue-700">
+                                                Ver texto do contrato
+                                              </summary>
+                                              <p className="mt-2 whitespace-pre-wrap break-words text-[11px] leading-relaxed text-slate-600">
+                                                {contract.text}
+                                              </p>
+                                            </details>
+                                          ) : (
+                                            <div className="mt-1 flex items-center gap-2">
+                                              <p className="text-[10px] text-slate-500">
+                                                Contrato em PDF importado
+                                                anteriormente.
+                                              </p>
+                                              {contract.storagePath && (
+                                                <button
+                                                  onClick={() =>
+                                                    void handleDownloadCompanyContract(
+                                                      contract,
+                                                    )
+                                                  }
+                                                  className="rounded-md p-1 text-blue-700 hover:bg-blue-50"
+                                                  aria-label={`Baixar ${contract.name}`}
+                                                  title="Baixar contrato"
+                                                >
+                                                  <Download size={14} />
+                                                </button>
+                                              )}
+                                            </div>
+                                          )}
+                                        </div>
                                         <button
                                           disabled={
                                             deletingCompanyContracts[
@@ -2408,7 +2628,7 @@ function App() {
                                 </ul>
                               ) : (
                                 <p className="mt-3 text-[10px] text-slate-500">
-                                  Nenhum contrato importado para esta empresa.
+                                  Nenhum contrato salvo para esta empresa.
                                 </p>
                               )}
                             </div>
@@ -2583,6 +2803,101 @@ function App() {
                       ? "Nenhum usuário encontrado para essa busca."
                       : "Nenhuma conta cadastrada ainda."}
                   </p>
+                )}
+              </div>
+            </section>
+          )}
+
+          {view === "audit" && isAdmin && (
+            <section>
+              <PageHeading
+                eyebrow="ADMINISTRAÇÃO GLOBAL"
+                title="Auditoria"
+                description="Consulte as ações administrativas, reservas e cancelamentos registrados."
+              />
+              <div className="mt-6 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-5 py-4">
+                  <div>
+                    <h2 className="text-sm font-bold">Audit log</h2>
+                    <p className="mt-1 text-xs text-slate-500">
+                      {auditLogs.length
+                        ? `Exibindo até ${auditLogs.length} dos 500 eventos mais recentes.`
+                        : "Os eventos serão registrados conforme as ações ocorrerem."}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={clearingAuditLogs || !auditLogs.length}
+                    onClick={() => void handleClearAuditLogs()}
+                    className="inline-flex items-center gap-2 rounded-lg border border-rose-200 px-3 py-2 text-xs font-semibold text-rose-700 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <Trash2 size={15} />
+                    {clearingAuditLogs ? "Limpando…" : "Limpar log"}
+                  </button>
+                </div>
+                {!auditLogsLoaded ? (
+                  <p className="px-5 py-10 text-center text-xs text-slate-500">
+                    Carregando eventos…
+                  </p>
+                ) : auditLogs.length ? (
+                  <div className="overflow-x-auto">
+                    <table className="w-full min-w-[850px] text-left text-xs">
+                      <thead className="bg-slate-50 text-[10px] uppercase tracking-wide text-slate-500">
+                        <tr>
+                          <th className="px-5 py-3 font-semibold">
+                            Data e hora
+                          </th>
+                          <th className="px-5 py-3 font-semibold">Usuário</th>
+                          <th className="px-5 py-3 font-semibold">Ação</th>
+                          <th className="px-5 py-3 font-semibold">Detalhes</th>
+                          <th className="px-5 py-3 font-semibold">Empresa</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {auditLogs.map((log) => (
+                          <tr key={log.id} className="align-top">
+                            <td className="whitespace-nowrap px-5 py-3 text-slate-500">
+                              {new Date(log.createdAt).toLocaleString("pt-BR")}
+                            </td>
+                            <td className="px-5 py-3">
+                              <span className="font-medium text-slate-800">
+                                {log.actorName}
+                              </span>
+                              <span className="mt-1 block text-[10px] text-slate-400">
+                                {log.actorRole === "admin"
+                                  ? "Administrador"
+                                  : "Usuário"}
+                              </span>
+                            </td>
+                            <td className="whitespace-nowrap px-5 py-3 font-semibold text-slate-700">
+                              {log.action}
+                            </td>
+                            <td className="max-w-md whitespace-pre-wrap break-words px-5 py-3 text-slate-600">
+                              {log.details}
+                            </td>
+                            <td className="px-5 py-3 text-slate-500">
+                              {companies.find(
+                                (company) => company.id === log.companyId,
+                              )?.name || log.companyId}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <div className="px-5 py-12 text-center">
+                    <ClipboardList
+                      className="mx-auto text-slate-300"
+                      size={28}
+                    />
+                    <p className="mt-3 text-sm font-semibold">
+                      Nenhum evento registrado
+                    </p>
+                    <p className="mt-1 text-xs text-slate-500">
+                      Quando houver novas ações, elas aparecerão nesta tabela.
+                    </p>
+                  </div>
                 )}
               </div>
             </section>

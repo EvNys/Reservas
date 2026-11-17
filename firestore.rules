@@ -32,6 +32,28 @@ service cloud.firestore {
       return /databases/$(database)/documents/reservations/$(bookingId);
     }
 
+    function validReservationAudit(data) {
+      let path = bookingPath(data.entityId);
+      return data.entityType == 'Reserva'
+        && exists(path)
+        && get(path).data.companyId == data.companyId
+        && (
+          (
+            data.action == 'Reserva criada'
+            && get(path).data.status == 'confirmed'
+            && get(path).data.userId == request.auth.uid
+          )
+          || (
+            data.action == 'Reserva cancelada'
+            && get(path).data.status == 'cancelled'
+            && (
+              get(path).data.userId == request.auth.uid
+              || isAdmin(data.companyId)
+            )
+          )
+        );
+    }
+
     function roomPath(roomId) {
       return /databases/$(database)/documents/rooms/$(roomId);
     }
@@ -311,6 +333,53 @@ service cloud.firestore {
       allow delete: if isAdmin(resource.data.companyId);
     }
 
+    match /auditLogs/{auditLogId} {
+      allow read: if isGlobalAdmin();
+      allow create: if profileIsApproved()
+        && request.resource.data.keys().hasOnly([
+          'actorUid', 'actorName', 'actorRole', 'companyId', 'action',
+          'entityType', 'entityId', 'details', 'createdAt'
+        ])
+        && request.resource.data.keys().hasAll([
+          'actorUid', 'actorName', 'actorRole', 'companyId', 'action',
+          'entityType', 'entityId', 'details', 'createdAt'
+        ])
+        && request.resource.data.actorUid == request.auth.uid
+        && request.resource.data.actorName == profile().name
+        && request.resource.data.actorRole == profile().role
+        && request.resource.data.companyId is string
+        && request.resource.data.companyId.size() > 0
+        && request.resource.data.action is string
+        && request.resource.data.action.size() > 0
+        && request.resource.data.action.size() <= 80
+        && request.resource.data.entityType is string
+        && request.resource.data.entityType.size() > 0
+        && request.resource.data.entityType.size() <= 40
+        && request.resource.data.entityId is string
+        && request.resource.data.entityId.size() > 0
+        && request.resource.data.entityId.size() <= 200
+        && request.resource.data.details is string
+        && request.resource.data.details.size() <= 1000
+        && request.resource.data.createdAt is number
+        && (
+          (
+            request.resource.data.action in ['Reserva criada', 'Reserva cancelada']
+            && validReservationAudit(request.resource.data)
+          )
+          || (
+            request.resource.data.action in [
+              'Empresa criada', 'Empresa excluída', 'Contrato salvo',
+              'Contrato removido', 'Usuário alocado', 'Acesso aprovado',
+              'Acesso recusado', 'Sala adicionada', 'Sala atualizada',
+              'Pacote atualizado'
+            ]
+            && isGlobalAdmin()
+          )
+        );
+      allow update: if false;
+      allow delete: if isGlobalAdmin();
+    }
+
     match /companies/{company} {
       allow read: if isGlobalAdmin() || sameCompany(company);
       allow create: if isGlobalAdmin()
@@ -323,15 +392,25 @@ service cloud.firestore {
       match /contracts/{contractId} {
         allow read: if isGlobalAdmin();
         allow create: if isGlobalAdmin()
-          && request.resource.data.keys().hasOnly(['name', 'size', 'storagePath', 'createdAt'])
-          && request.resource.data.keys().hasAll(['name', 'size', 'storagePath', 'createdAt'])
           && request.resource.data.name is string
           && request.resource.data.name.size() > 0
-          && request.resource.data.size is number
-          && request.resource.data.size > 0
-          && request.resource.data.size <= 15 * 1024 * 1024
-          && request.resource.data.storagePath == 'companies/' + company + '/contracts/' + contractId + '.pdf'
-          && request.resource.data.createdAt is number;
+          && request.resource.data.createdAt is number
+          && (
+            (
+              request.resource.data.keys().hasOnly(['name', 'text', 'createdAt'])
+              && request.resource.data.keys().hasAll(['name', 'text', 'createdAt'])
+              && request.resource.data.text is string
+              && request.resource.data.text.size() > 0
+            )
+            || (
+              request.resource.data.keys().hasOnly(['name', 'size', 'storagePath', 'createdAt'])
+              && request.resource.data.keys().hasAll(['name', 'size', 'storagePath', 'createdAt'])
+              && request.resource.data.size is number
+              && request.resource.data.size > 0
+              && request.resource.data.size <= 15 * 1024 * 1024
+              && request.resource.data.storagePath == 'companies/' + company + '/contracts/' + contractId + '.pdf'
+            )
+          );
         allow delete: if isGlobalAdmin();
         allow update: if false;
       }
