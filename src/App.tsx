@@ -25,6 +25,7 @@ import {
   ShieldCheck,
   Sparkles,
   Trash2,
+  Truck,
   Users,
   X,
 } from "lucide-react";
@@ -45,7 +46,14 @@ import type {
   WorkspaceData,
 } from "./firebase";
 
-type View = "reserve" | "mine" | "manage" | "companies" | "users" | "audit";
+type View =
+  | "reserve"
+  | "mine"
+  | "manage"
+  | "companies"
+  | "users"
+  | "audit"
+  | "logistics";
 
 const initialDate = localDate(new Date());
 const emptyWorkspaceData: WorkspaceData = {
@@ -388,6 +396,7 @@ function App() {
   >({});
   const [accountSearch, setAccountSearch] = useState("");
   const [platformAccountSearch, setPlatformAccountSearch] = useState("");
+  const [logisticsSearch, setLogisticsSearch] = useState("");
   const [companyBusy, setCompanyBusy] = useState(false);
   const [deletingCompanies, setDeletingCompanies] = useState<
     Record<string, boolean>
@@ -821,6 +830,33 @@ function App() {
         .includes(platformAccountSearch.trim().toLocaleLowerCase("pt-BR")),
     )
     .sort((left, right) => left.name.localeCompare(right.name, "pt-BR"));
+  const logisticsAccounts = allAccounts
+    .filter((account) => {
+      const companyName =
+        companies.find((company) => company.id === account.companyId)?.name ||
+        account.companyId;
+      return `${account.name} ${account.email} ${companyName}`
+        .toLocaleLowerCase("pt-BR")
+        .includes(logisticsSearch.trim().toLocaleLowerCase("pt-BR"));
+    })
+    .sort((left, right) => left.name.localeCompare(right.name, "pt-BR"));
+  const reservationsByUser = workspace.reservations.reduce<
+    Record<string, { total: number; confirmed: number; cancelled: number }>
+  >((counts, booking) => {
+    const userCounts = counts[booking.userId] || {
+      total: 0,
+      confirmed: 0,
+      cancelled: 0,
+    };
+    userCounts.total += 1;
+    if (booking.status === "confirmed") userCounts.confirmed += 1;
+    else userCounts.cancelled += 1;
+    counts[booking.userId] = userCounts;
+    return counts;
+  }, {});
+  const confirmedReservationCount = workspace.reservations.filter(
+    (booking) => booking.status === "confirmed",
+  ).length;
   const monthDate = new Date(`${date}T12:00:00`);
   const dayCount = new Date(
     monthDate.getFullYear(),
@@ -1541,6 +1577,7 @@ function App() {
     companies: "Empresas",
     users: "Usuários",
     audit: "Auditoria",
+    logistics: "Logística",
   };
 
   return (
@@ -1627,6 +1664,15 @@ function App() {
                 label="Auditoria"
                 onClick={() => {
                   setView("audit");
+                  setSidebarOpen(false);
+                }}
+              />
+              <SideLink
+                active={view === "logistics"}
+                icon={<Truck size={18} />}
+                label="Logística"
+                onClick={() => {
+                  setView("logistics");
                   setSidebarOpen(false);
                 }}
               />
@@ -2906,6 +2952,125 @@ function App() {
                       Quando houver novas ações, elas aparecerão nesta tabela.
                     </p>
                   </div>
+                )}
+              </div>
+            </section>
+          )}
+
+          {view === "logistics" && isAdmin && (
+            <section>
+              <PageHeading
+                eyebrow="ADMINISTRAÇÃO GLOBAL"
+                title="Logística"
+                description="Acompanhe o tamanho da operação e a distribuição de reservas por usuário."
+              />
+              <div className="mt-7 grid gap-4 md:grid-cols-3">
+                <MetricCard
+                  label="Total de usuários"
+                  value={String(allAccounts.length)}
+                  icon={<Users size={18} />}
+                />
+                <MetricCard
+                  label="Empresas cadastradas"
+                  value={String(companies.length)}
+                  icon={<Building2 size={18} />}
+                />
+                <MetricCard
+                  label="Reservas confirmadas"
+                  value={String(confirmedReservationCount)}
+                  icon={<CalendarDays size={18} />}
+                />
+              </div>
+              <div className="mt-6 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-5 py-4">
+                  <div>
+                    <h2 className="text-sm font-bold">Reservas por usuário</h2>
+                    <p className="mt-1 text-xs text-slate-500">
+                      Contagem de reservas registradas, incluindo cancelamentos.
+                    </p>
+                  </div>
+                  <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[10px] font-semibold">
+                    {allAccounts.length} usuários
+                  </span>
+                </div>
+                <label className="relative m-5 mb-0 block max-w-md">
+                  <Search
+                    size={15}
+                    className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"
+                  />
+                  <input
+                    type="search"
+                    value={logisticsSearch}
+                    onChange={(event) => setLogisticsSearch(event.target.value)}
+                    placeholder="Buscar por usuário ou empresa"
+                    aria-label="Buscar por usuário ou empresa"
+                    className="form-input pl-9"
+                  />
+                </label>
+                {logisticsAccounts.length ? (
+                  <div className="mt-4 overflow-x-auto">
+                    <table className="w-full min-w-[720px] text-left text-xs">
+                      <thead className="bg-slate-50 text-[10px] uppercase tracking-wide text-slate-500">
+                        <tr>
+                          <th className="px-5 py-3 font-semibold">Usuário</th>
+                          <th className="px-5 py-3 font-semibold">Empresa</th>
+                          <th className="px-5 py-3 text-right font-semibold">
+                            Total
+                          </th>
+                          <th className="px-5 py-3 text-right font-semibold">
+                            Confirmadas
+                          </th>
+                          <th className="px-5 py-3 text-right font-semibold">
+                            Canceladas
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {logisticsAccounts.map((account) => {
+                          const userReservations =
+                            reservationsByUser[account.uid] || {
+                              total: 0,
+                              confirmed: 0,
+                              cancelled: 0,
+                            };
+                          const companyName =
+                            companies.find(
+                              (company) => company.id === account.companyId,
+                            )?.name || "Empresa não cadastrada";
+                          return (
+                            <tr key={account.uid}>
+                              <td className="px-5 py-3">
+                                <span className="font-medium text-slate-800">
+                                  {account.name}
+                                </span>
+                                <span className="mt-1 block text-[10px] text-slate-400">
+                                  {account.email}
+                                </span>
+                              </td>
+                              <td className="px-5 py-3 text-slate-600">
+                                {companyName}
+                              </td>
+                              <td className="px-5 py-3 text-right font-semibold text-slate-700">
+                                {userReservations.total}
+                              </td>
+                              <td className="px-5 py-3 text-right text-emerald-700">
+                                {userReservations.confirmed}
+                              </td>
+                              <td className="px-5 py-3 text-right text-slate-500">
+                                {userReservations.cancelled}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <p className="px-5 py-10 text-center text-xs text-slate-500">
+                    {logisticsSearch
+                      ? "Nenhum usuário ou empresa encontrado."
+                      : "Nenhuma conta cadastrada ainda."}
+                  </p>
                 )}
               </div>
             </section>
